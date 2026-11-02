@@ -178,7 +178,12 @@ fn resolve_paths(server: Server) -> Result<HarnessPaths, String> {
     }
     let servants_json = app_data.join("assets").join("catalogs").join("servants.json");
     if !servants_json.is_file() {
-        return Err(format!("未找到从者元数据: {}", servants_json.display()));
+        // The sidecar degrades to an empty servant catalog without it; the
+        // event verbs do not use it. Warn and keep going.
+        eprintln!(
+            "[harness] 警告: 未找到从者元数据 ({}), 从者名归一化不可用",
+            servants_json.display()
+        );
     }
 
     let template_dirs = vec![
@@ -410,7 +415,10 @@ impl EventCvSource for HarnessSidecar {
         let resp = self
             .request(
                 serde_json::json!({"cmd": "detect", "diagnostics": false, "screenNames": self.screen_names}),
-                Duration::from_secs(10),
+                // The sidecar recycles its OCR subprocess every N detects
+                // (reason=detect-limit); the detect that triggers a recycle
+                // also waits for the new process's model load.
+                Duration::from_secs(60),
             )
             .map_err(|e| format!("detect: {e}"))?;
         if let Some(error) = resp.get("error").and_then(|v| v.as_str()) {
