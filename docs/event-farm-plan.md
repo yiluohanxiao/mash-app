@@ -351,7 +351,7 @@ Python 编码与校验；ADB `sendevent` MT-B 作为备用后端，仅当 scrcpy
 | --- | --- | --- |
 | **M0**（已完成 2026-11-02） | 装工具链；新增 M0 的 `Screen` + `cv.json` + 关键词检测；corpus 离线回归 | `cargo test` / `pnpm build` 通过；已实现画面的 corpus 正/负样本全通过（见第 9 节） |
 | **M1**（代码完成 2026-11-02，待实机验收） | 捏合、拖动、边界、归位、标签 OCR、关卡卡解析、扫图缓存 | 实机扫出 8 个标签；卡片名称/等级/AP/锁定与手工核对一致；缓存 3 小时生效 |
-| **M2** | 选本 + 进关：点标签 → 开卡 → ▶ → 确认 → 交给现有 Runner | 从地图进入战斗，全程无人工；`SupportSelect` 起由 mash 接管 |
+| **M2**（代码完成 2026-11-03，待实机验收） | 选本 + 进关：点标签 → 开卡 → ▶ → 确认 → 交给现有 Runner | 从地图进入战斗，全程无人工；`SupportSelect` 起由 mash 接管 |
 | **M3** | 循环：结算 → 回地图 → 下一轮；失败/掉线恢复 | 连续打 5 个本不中断；全灭只停不复活 |
 | **M4** | AP 检查、苹果、等回复、掉落目标 | 配置生效；圣晶石永远不在默认顺序；`max_total` 与等待预算正确 |
 | **M5** | 每日任务 / 周常（可选） | 按档位/篇选本，不看 AP |
@@ -487,3 +487,39 @@ M1 验证结果（本机）：
   `test_verify_code_release.py` 7 条与 `test_build_code.py` 1 条（需要 Python 3.11 的
   `hashlib.file_digest` / `tomllib`，本机是 3.10）。
 - 实机验收未做：需要用户在地图页点「扫描活动地图」核对 8 个标签与卡片数值。
+
+---
+
+## 11. M2 落地记录（2026-11-03）
+
+已完成：
+
+- `EventFarmConfig`（`target_quest`）挂在 `RunConfig.event_farm`；启动命令
+  `start_event_farm_automation` 复用战斗启动链，设备租约新增
+  `AutomationKind::EventFarm`，仅国服可用。
+- `Runner` 挂载 `EventFarmRuntime`（决策 A，与 `RankUpQuestRuntime` 并列）；识别范围
+  按模式切换到 `use_event_detection()`；主循环把 `EventMap` / `NodeDetail` /
+  `QuestConfirm` / `Gate` 路由进 `runner/event/farm.rs`。
+- 选卡：3 小时扫图缓存优先，失效现场扫描并回写；指定名按 `hint_ok` 匹配（取最高等级），
+  否则 `best_farm_quest`。标签坐标每次 OCR 现找，找不到等待重试，不猜坐标。
+- 进关坐标取参考实现（▶ 1370,320；开始 1259,846；卡片关闭 163,63），归一化后经
+  `tap_at` 走人类化抖动；标签点击走 `tap_screen_point`（同为设备像素 + 抖动）。
+- 同一标签最多 3 次尝试（卡片被点掉 / OCR 找不到标签都计入），超限报错停止。
+- 结算页 `BattleResultContinue` 活动模式下点「结束」并停止；M3 再换成回地图循环。
+- 入口：战斗页「活动刷本」开关（临时 UI 状态，不落项目配置），打开后启动命令切到
+  `start_event_farm_automation` 并携带 `eventFarm: {}`；dev mock 与页面测试同步。
+
+与计划的偏差：
+
+1. 未做 `plan_once` 完整策略（主线/点数/退避/等 AP）——那是 M4；M2 的选卡就是
+   「指定名或最高等级可打本」。
+2. 未新增独立活动页：战斗页开关复用项目/助战/苹果配置，正式活动页按计划仍是 M6 前
+   的独立条目。
+3. `Story` / `Tip` / `PartyConfirm` 等进关途中可能出现的画面暂不处理（等待直至超时），
+   与参考实现的跳过逻辑一起归入 M3/M4。
+
+M2 验证结果（本机）：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml`：918 passed / 0 failed / 10 ignored。
+- `pnpm build`：eslint / tsc / vitest / vite build 全部通过（含活动开关用例）。
+- 实机验收未做：地图扫描（M1）+ 进关（M2）需一次上机连验。

@@ -850,6 +850,7 @@ async function invokeLegacyDevMock<T>(cmd: string, args: InvokeArgs = {}): Promi
       } as T;
     case "start_automation":
     case "start_rank_up_quest_automation":
+    case "start_event_farm_automation":
     case "stop_automation":
     case "stop_automation_after_current":
     case "start_enhancement_automation":

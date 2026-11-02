@@ -7,7 +7,7 @@
 生命周期、模板错误和失败诊断见[公共约定](README.md)。参考实现来自 `reference/fgo-auto/`
 （只读导出，已被 git 忽略），逐函数映射见 [event-farm-plan.md](../event-farm-plan.md)。
 
-## 当前范围（M1）
+## 当前范围（M2）
 
 已完成：
 
@@ -26,10 +26,12 @@
 - `runner/event/`：地图平移/边界/归位、标签 OCR、关卡卡解析、扫图缓存（3 小时）、
   增量扫描与合并。
 - 调试命令 `debug_scan_event_map` 与前端「扫描活动地图」按钮，实机验收靠它。
+- M2 进关：`EventFarmRuntime` 驱动 `EventMap → NodeDetail → QuestConfirm`，`Gate` 退出，
+  从 `SupportSelect` 起交给战斗引擎；入口是战斗页「活动刷本」开关。
 
-未完成（后续里程碑）：二维拖图兜底扫描、选本进关（M2）、循环与恢复（M3）、点数策略接入、
-Runner 接入、正式活动页面。在接入之前，战斗 runner 把所有活动画面与 `Unknown` 放进同一
-分支：只等待、累计识别超时、不点击，避免在地图或失败页上盲点。
+未完成（后续里程碑）：结算后回地图的循环与恢复（M3）、点数策略与苹果（M4）、每日任务（M5）、
+正式活动页面（现用战斗页开关）。除进关四画面外，其余活动画面（`Terminal`、`Story`、
+`Tip`、`PartyConfirm` 等）在活动模式下仍走 `Unknown` 分支：只等待、累计识别超时、不点击。
 
 ## 识别顺序
 
@@ -108,6 +110,33 @@ M1 只做「缩到最小后一屏放下」这一种扫法。
 和上次锁定的标签（`delta_targets`），合并时同名卡片以新结果为准；同一标签既读到锁定卡
 又读到解锁卡时保留解锁卡（`merge_delta`）。
 
+## 进关流程（M2）
+
+活动模式由现有 `Runner` 内的 `EventFarmRuntime` 驱动（决策 A：不建第二个 runner 进程，
+沿用 rank-up quest 的挂载方式）。启动命令 `start_event_farm_automation` 复用战斗启动链
+（设备租约记为 `AutomationKind::EventFarm`），识别范围切到 `use_event_detection()`；
+主循环把四个画面路由进 `runner/event/farm.rs`：
+
+| 画面 | 动作 | 之后 |
+| --- | --- | --- |
+| `EventMap` | 取扫图缓存（3 小时内）或现场扫描；`pick_target_card` 选卡（指定名按名匹配，否则 `best_farm_quest`）；OCR 现找标签坐标并点击 | → `NodeDetail` |
+| `NodeDetail` | 点 ▶（参考坐标 1370,320） | → `QuestConfirm` / 助战链 |
+| `QuestConfirm` | 点「开始任务」（参考坐标 1259,846） | 助战/队伍/战斗由现有处理器接管 |
+| `Gate` | 进关途中误入自由本列表：只点左上「关闭」 | 回 `EventMap` 重试 |
+
+同一标签最多点 3 次：地图上重新观测到 `EventMap`（卡片被点掉）或 OCR 连续找不到标签
+都会计入，超限直接报错停止，不会盲点。地图上找不到标签时等待重试，不猜坐标。
+
+结算页 `BattleResultContinue` 在活动模式下点「结束」并 `Finished`（M2 只进一个本）；
+M3 把这里换成「回地图选下一个本」。
+
+从 `SupportSelect` / `TeamConfirm` / `Battle` / 结算 onward 全部走现有战斗处理器，
+队伍、助战、技能配置沿用所选编队项目。
+
+入口：战斗页脚的「活动刷本」开关。打开后「开始任务」改发
+`start_event_farm_automation`，配置与普通战斗完全一致；关闭后行为不变。
+启动要求游戏已停在活动地图，且区服为 CN。
+
 ## 触控：双指缩放
 
 `TouchBackend::pinch(center, from_gap, to_gap, duration_ms)` 的 gap 是**两指总间距**，
@@ -163,5 +192,8 @@ M1 只做「缩到最小后一屏放下」这一种扫法。
 - `sidecar/cv-code/tests/test_scrcpy_control.py`：双指包格式、指针校验、中断时释放所有指针。
 - `cargo test --manifest-path src-tauri/Cargo.toml`：`Screen` 往返、检测范围、`cn/cv.json`
   活动探针的优先级顺序与 `overrides` 目标合法性；`runner/event/tests.rs` 覆盖卡片解析、
-  平移几何、帧差边界、标签去重、缓存 TTL、增量合并；`touch/scrcpy.rs` 覆盖捏合事件序列。
+  平移几何、帧差边界、标签去重、缓存 TTL、增量合并；`runner/event/farm.rs` 覆盖选卡
+  （指定名 / 回退最高等级 / 锁定排除）、进关坐标、阶段初值；`touch/scrcpy.rs` 覆盖捏合事件序列。
+- `src/features/battle/__tests__/BattlePage.test.tsx`：「活动刷本」开关把启动命令切到
+  `start_event_farm_automation` 并携带 `eventFarm`。
 - `src/features/debug/__tests__/DebugPage.test.tsx`：扫描按钮把标签/点数/卡片写入日志。

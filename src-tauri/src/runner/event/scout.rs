@@ -12,6 +12,8 @@ use crate::screen::MapLabel;
 
 /// Labels to (re)read for a delta scan: new labels first, then locked
 /// ones. The returned labels borrow from `labels`.
+/// M3 incremental-rescan surface; pinned by unit tests today.
+#[allow(dead_code)]
 pub(crate) fn delta_targets<'a>(
     previous: &[QuestCard],
     labels: &'a [MapLabel],
@@ -36,6 +38,8 @@ pub(crate) fn delta_targets<'a>(
 /// When the same label yields both a locked and an unlocked card (the
 /// card was renamed on unlock), keep the unlocked entry and drop the old
 /// name, so the planner never targets a stale locked node.
+/// M3 incremental-rescan surface; pinned by unit tests today.
+#[allow(dead_code)]
 pub(crate) fn merge_delta(
     previous: Vec<QuestCard>,
     added: Vec<QuestCard>,

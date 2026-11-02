@@ -540,6 +540,22 @@ impl Runner {
             return;
         }
 
+        if self.event_farm_active() {
+            // M2 enters one quest and stops; the map loop (M3) replaces this
+            // branch with "return to the event map and pick the next quest".
+            self.completed_mission_runs += 1;
+            self.emit_run_progress();
+            self.emit(
+                "BattleResultContinue",
+                &format!("活动刷本结束（已完成 {} 轮）", self.completed_mission_runs),
+            );
+            if !self.tap_at("BattleResultContinue", BATTLE_RESULT_CONTINUE_STOP) {
+                return;
+            }
+            self.transition_lifecycle(RunnerLifecycleEvent::Finished);
+            return;
+        }
+
         self.completed_mission_runs += 1;
         self.emit_run_progress();
 

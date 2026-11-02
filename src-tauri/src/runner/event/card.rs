@@ -10,6 +10,8 @@ use crate::screen::QuestCardResult;
 /// AP at or above this is a farming node (reference: `FARM_AP`).
 pub(crate) const FARM_AP: u32 = 20;
 /// AP at or below this is a story/challenge node (reference: `STORY_AP`).
+/// Consumed by the M3/M4 point-strategy planner; pinned by unit tests today.
+#[allow(dead_code)]
 pub(crate) const STORY_AP: u32 = 10;
 
 /// A quest card read from the map's card box.
@@ -64,6 +66,8 @@ impl QuestCard {
     /// Story nodes are low-AP and are not high-difficulty challenges.
     /// The name alone cannot decide: an unlocked story card shows the
     /// quest title, while a locked one shows `主线关卡第N节`.
+    /// M3/M4 point-strategy surface; pinned by unit tests today.
+    #[allow(dead_code)]
     pub(crate) fn is_story(&self) -> bool {
         if self.name.contains("高难度") || self.name.to_uppercase().contains("LIVE FES") {
             return false;
@@ -71,6 +75,8 @@ impl QuestCard {
         self.ap <= STORY_AP
     }
 
+    /// M3/M4 point-strategy surface; pinned by unit tests today.
+    #[allow(dead_code)]
     pub(crate) fn is_farm(&self) -> bool {
         self.ap >= FARM_AP
     }
@@ -78,6 +84,8 @@ impl QuestCard {
     /// Event points required to unlock the card, or 0 when unconstrained.
     /// Mirrors the reference `点数达 X 以上` extraction; unit suffixes
     /// such as `万` are deliberately not interpreted, same as upstream.
+    /// M3/M4 point-strategy surface; pinned by unit tests today.
+    #[allow(dead_code)]
     pub(crate) fn threshold(&self) -> u32 {
         let Some(start) = self.cond.find("点数达") else {
             return 0;
@@ -96,6 +104,8 @@ impl QuestCard {
 
     /// Failure-blacklist key. Same name at a different level/AP is a
     /// different node and must not share the counter.
+    /// M3/M4 blacklist surface (in-memory only); pinned by unit tests today.
+    #[allow(dead_code)]
     pub(crate) fn bad_key(&self) -> String {
         format!("{}|{}|{}", self.name, self.level_text(), self.ap)
     }

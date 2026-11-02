@@ -38,7 +38,11 @@ impl Runner {
     }
 
     fn run_loop(&mut self) -> AutomationResult<()> {
-        self.sidecar().use_battle_detection();
+        if self.event_farm_active() {
+            self.sidecar().use_event_detection();
+        } else {
+            self.sidecar().use_battle_detection();
+        }
         let timeout = self.config.unknown_screen_timeout_count;
         if let Err(error) = self.sidecar().configure_recognition_diagnostics(timeout) {
             self.emit_debug("CV", &error);
@@ -194,15 +198,20 @@ impl Runner {
                     last_detected_screen = screen;
                     self.handle_ap_recovery()?;
                 }
+                // Event-farm mode routes the map/entry screens through the
+                // event runtime; ordinary runs never see them (battle
+                // detection scope excludes them).
+                Screen::EventMap | Screen::NodeDetail | Screen::QuestConfirm | Screen::Gate => {
+                    unknown_count = 0;
+                    last_detected_screen = screen;
+                    self.handle_event_screen(screen)?;
+                }
                 // Event-farm screens are only produced when the sidecar runs
                 // the event detection scope. This runner has no routing for
                 // them yet, so they share the unknown-frame handling: wait,
                 // count toward the recognition timeout, never tap.
                 Screen::Unknown
-                | Screen::EventMap
                 | Screen::Terminal
-                | Screen::NodeDetail
-                | Screen::QuestConfirm
                 | Screen::Story
                 | Screen::SkipConfirm
                 | Screen::TapContinue
@@ -214,7 +223,6 @@ impl Runner {
                 | Screen::RewardSelect
                 | Screen::RewardPage
                 | Screen::ServantFull
-                | Screen::Gate
                 | Screen::Tip
                 | Screen::PartyConfirm
                 | Screen::RepeatConfirm

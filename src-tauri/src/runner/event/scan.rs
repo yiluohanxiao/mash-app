@@ -17,7 +17,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Wait for the map to finish rendering after entering it.
 const MAP_SETTLE: Duration = Duration::from_millis(1_500);
-const TAP_SETTLE: Duration = Duration::from_millis(1_800);
+/// Settle window after tapping a region label, shared with the runtime's
+/// label tap.
+pub(crate) const TAP_SETTLE: Duration = Duration::from_millis(1_800);
 const CLOSE_SETTLE: Duration = Duration::from_millis(1_400);
 const PAN_SETTLE: Duration = Duration::from_millis(1_600);
 const PINCH_SETTLE: Duration = Duration::from_millis(1_400);

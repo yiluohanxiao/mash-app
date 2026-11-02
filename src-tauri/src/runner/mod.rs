@@ -9,9 +9,6 @@ mod config;
 mod coords;
 mod diagnostics;
 mod engine;
-// Event-map navigation is exercised from M2's automation loop; until
-// then its pure pieces are covered by unit tests only.
-#[allow(dead_code)]
 mod event;
 pub(crate) use event::*;
 mod fault_injection;
@@ -121,6 +118,10 @@ pub struct Runner {
     sidecar_cache: Option<Arc<Mutex<Option<SidecarClient>>>>,
     config: RunConfig,
     rank_up_quest: Option<RankUpQuestRuntime>,
+    /// Event-farm mode. `Some` makes the main loop route the event-map
+    /// screens through `runner/event/farm.rs` before the battle handlers
+    /// take over at SupportSelect.
+    event_farm_runtime: Option<EventFarmRuntime>,
     scenes: Vec<BattleScene>,
     advanced_mode: bool,
     advanced_scenes: Vec<AdvancedBattleScene>,
@@ -239,6 +240,7 @@ impl Runner {
         let (frame_w, frame_h) = frame_size.unwrap_or((DEFAULT_FRAME_W, DEFAULT_FRAME_H));
         let touch = touch::build(&adb, &sidecar, &app_handle, (screen_w, screen_h));
         let rank_up_quest = config.rank_up_quest.clone().map(RankUpQuestRuntime::new);
+        let event_farm_runtime = config.event_farm.clone().map(EventFarmRuntime::new);
         Self {
             diagnostic_adb: adb,
             touch,
@@ -246,6 +248,7 @@ impl Runner {
             sidecar_cache,
             config,
             rank_up_quest,
+            event_farm_runtime,
             scenes,
             advanced_mode,
             advanced_scenes,
