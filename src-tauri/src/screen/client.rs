@@ -314,7 +314,11 @@ impl SidecarClient {
         &mut self,
         request: &serde_json::Value,
     ) -> Result<serde_json::Value, CvError> {
-        self.send_recv_with_timeout(request, Duration::from_secs(10))
+        // The sidecar recycles its OCR subprocess every N detects
+        // (reason=detect-limit) and the request that triggers a recycle also
+        // waits for the new process's model load, which can exceed 10s on a
+        // cold cache. Give every command that allowance.
+        self.send_recv_with_timeout(request, Duration::from_secs(60))
     }
 
     /// Like `send_recv` but with a caller-specified timeout. Used by commands
