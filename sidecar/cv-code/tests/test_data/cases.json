@@ -15,6 +15,21 @@
     {
       "image": "screenshots/support_select.png",
       "expectedScreen": "SupportSelect"
+    },
+    {
+      "image": "screenshots/event_map_cn_device_halloween2026.png",
+      "expectedScreen": "EventMap",
+      "server": "cn"
+    },
+    {
+      "image": "screenshots/node_detail_cn_device_halloween2026.png",
+      "expectedScreen": "NodeDetail",
+      "server": "cn"
+    },
+    {
+      "image": "screenshots/support_select_cn_device_halloween2026.png",
+      "expectedScreen": "SupportSelect",
+      "server": "cn"
     }
   ],
   "findElement": [
