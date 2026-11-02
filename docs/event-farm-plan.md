@@ -659,3 +659,56 @@ event_harness`，`--phase scan|enter`）。复用生产侧 `EventScanner` / `pla
 
 M1 卡片数值已按上表记录为验收证据；截图与日志都在 `.screenshots/`（gitignored，
 不入库）。
+
+## 15. P4–P6 隔夜执行记录（2026-11-03 凌晨）
+
+OVERNIGHT-GOAL.md 的 overnight 目标驱动，按 P1→P7 顺序执行。本节记录 P4 soak、
+P5 语料、P6 UI 的过程与结论。
+
+### P4 soak：`--phase loop` 设备连刷
+
+harness 新增 `--phase loop`：构建无窗口真实 Tauri App（shell 插件 + 空 scenes +
+默认助战），用生产 `SidecarClient` + `Runner` 跑完整 M3/M4 刷本循环；`--max-quests`
+限本次最多刷几个本。苹果上限 silver/bronze/copper 各 10，圣晶石/金苹果恒为 0。
+
+| 尝试 | 结果 | 暴露的问题（均已修复并提交） |
+| --- | --- | --- |
+| 1 | 1 分钟 error | 生产 `send_recv` 10s 超时在 OCR 回收边界失效 → 提到 60s |
+| 2 | panic | harness_app 漏 manage TouchControlSettingsState → 恢复 |
+| 3 | 连刷 2 本后卡死 ~30min | 通关后任务卡常驻（▶ 被任务进行度角标取代）→ `handle_node_detail` 有界重试 + 拉黑 + 关卡 |
+| 4 | 主线选对了但标签不在视野 | 游戏每次回图重置缩放/平移 → `EventScanner::find_label` 全图拖动搜索 |
+| 5 | 结算后 Unknown 卡死 | 首通齐格飞掉落宝具强化专用灵基 → 新增 `NpCeNotice` 屏幕 + TapContinue 区域延伸 |
+| 6 | **3/3 本连刷完成，正常退出** | 验收通过：completedRuns 1→2→3；苹果消耗 silver×1（上限 10 内），rainbow/gold 恒 0；败北未发生（代码路径由 M3 用例钉住）；期间 Tip 弹窗、掉落结算重试均自动恢复 |
+
+soak 6 起始状态：AP 108/142、点数 648,080（缓存含已首通的齐格飞，首本按主线目标
+实际进入节点当前关卡——已知限制 1，第二本起增量重扫自愈）。结束状态：点数
+722,440（+74,360），AP 58/142，回图待机，无需人工干预。
+
+soak 期间 harness 现在订阅 `automation-status` / `battle-run-progress` 并打印到
+stdout（无窗口时事件原本无人接收，出问题无法排查）。
+
+### P5 语料夹具
+
+今晚实机截图脱敏后入 `sidecar/cv-code/tests/test_data/`：活动地图、任务卡、助战
+（好友名/留言/等级涂灰）、宝具强化说明弹窗、点击继续。detect 用例新增 `server`
+字段（默认 jp）——此前集成测试只加载 shared+JP 配置，CN 设备截图永远探测不到
+仅存在于 `servers/cn/cv.json` 的屏幕；CN 用例按生产方式加载 CN 配置并发
+`set_server`。detect 会拉起 OCR 子进程，冷缓存模型加载可达数十秒，detect 会话
+超时提到 120s。13 个 detect 用例全部通过。
+
+### P6 EventFarmPage
+
+- `features/event-farm/EventFarmPage.tsx`：选队伍、目标关卡名（留空自动选）、
+  最多刷本次数、苹果策略展示（沿用队伍配置）；`start_event_farm_automation`，
+  无论队伍配置如何都不发送圣晶石。仅国服（与启动命令一致）。
+- 主页战斗菜单新增「活动刷本」入口；`VITE_FEATURE_EVENT_FARM` 开关（默认开）。
+- 移除战斗页临时「活动刷本」开关（正式页替代临时入口，计划第 11 节偏差 2 就此关闭）。
+- `pnpm build`（eslint + tsc + vitest + vite）全绿。
+
+### 已知限制（后续改进候选）
+
+1. 3 小时扫图缓存不感知首通：缓存里锁定的主线关首通后，下次启动仍会按主线目标
+   点开该节点，实际进入的是节点当前关卡（循环一次后增量重扫自愈）。改进方向：
+   打开任务卡后用 `read_card` 校验与 `pending_card` 一致，不一致先关卡重选。
+2. `NpCeNotice` 关闭坐标按本次弹窗实测（960, 850）；同款弹窗在其他分辨率/皮肤下
+   如按钮移位，需要补充模板或区域校验。
