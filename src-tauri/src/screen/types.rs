@@ -931,7 +931,7 @@ pub enum Screen {
     Unknown,
 }
 
-pub(super) const BATTLE_DETECTION_SCREENS: &[&str] = &[
+pub(crate) const BATTLE_DETECTION_SCREENS: &[&str] = &[
     "RankUpQuest",
     "TeamConfirm",
     "TeamChange",
@@ -955,7 +955,7 @@ pub(super) const BATTLE_DETECTION_SCREENS: &[&str] = &[
 /// `SidecarClient::use_event_detection` unions these with
 /// `BATTLE_DETECTION_SCREENS` so a single detect call can route the whole
 /// event loop.
-pub(super) const EVENT_ONLY_DETECTION_SCREENS: &[&str] = &[
+pub(crate) const EVENT_ONLY_DETECTION_SCREENS: &[&str] = &[
     "EventMap",
     "Terminal",
     "NodeDetail",

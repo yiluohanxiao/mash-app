@@ -5,6 +5,7 @@ mod commands;
 mod craft_essence_enhancement_runner;
 mod device_operation;
 mod enhancement_runner;
+pub mod event_harness;
 mod formation_share;
 mod friend_point_summon_runner;
 mod models;

@@ -112,7 +112,7 @@ impl QuestCard {
 pub(crate) fn best_farm_quest(cards: &[QuestCard]) -> Option<&QuestCard> {
     let mut pool: Vec<&QuestCard> = cards
         .iter()
-        .filter(|card| !card.locked && !card.name.contains("高难度") && card.ap >= FARM_AP)
+        .filter(|card| !card.locked && !card.name.contains("高难度") && card.is_farm())
         .collect();
     pool.sort_by(|a, b| (b.level_key(), b.ap).cmp(&(a.level_key(), a.ap)));
     pool.first().copied()

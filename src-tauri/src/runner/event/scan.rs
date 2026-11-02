@@ -10,7 +10,7 @@
 use super::cache::ScanCache;
 use super::card::QuestCard;
 use super::map::{self, Axis, MapNavigator};
-use crate::screen::{MapLabel, Screen, SidecarClient};
+use crate::screen::{EventCvSource, MapLabel, Screen};
 use crate::touch::TouchBackend;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -43,15 +43,15 @@ pub(crate) struct ScanOutcome {
     pub points: Option<u32>,
 }
 
-pub(crate) struct EventScanner<'a> {
-    client: &'a mut SidecarClient,
+pub(crate) struct EventScanner<'a, S: EventCvSource> {
+    client: &'a mut S,
     touch: &'a mut dyn TouchBackend,
     screen: (u32, u32),
 }
 
-impl<'a> EventScanner<'a> {
+impl<'a, S: EventCvSource> EventScanner<'a, S> {
     pub(crate) fn new(
-        client: &'a mut SidecarClient,
+        client: &'a mut S,
         touch: &'a mut dyn TouchBackend,
         screen: (u32, u32),
     ) -> Self {

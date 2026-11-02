@@ -32,9 +32,9 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Quest-detail card ▶ (forward) button, reference `nav.NODE_FORWARD`.
-const NODE_FORWARD: (f64, f64) = (1370.0 / 1920.0, 320.0 / 1080.0);
+pub(crate) const NODE_FORWARD: (f64, f64) = (1370.0 / 1920.0, 320.0 / 1080.0);
 /// Quest-confirm dialog 开始 button, reference `nav.QUEST_START`.
-const QUEST_START: (f64, f64) = (1259.0 / 1920.0, 846.0 / 1080.0);
+pub(crate) const QUEST_START_POINT: (f64, f64) = (1259.0 / 1920.0, 846.0 / 1080.0);
 /// Quest-detail card 关闭 button, reference `nav.CARD_CLOSE`.
 const CARD_CLOSE: (f64, f64) = (163.0 / 1920.0, 63.0 / 1080.0);
 /// Story screens: 右上「跳过」, then the confirm dialog's 「是」
@@ -439,7 +439,10 @@ impl Runner {
 
     fn handle_quest_confirm(&mut self) -> AutomationResult<()> {
         self.emit("QuestConfirm", "点击「开始任务」");
-        if self.tap_at("QuestConfirm", Point::new(QUEST_START.0, QUEST_START.1)) {
+        if self.tap_at(
+            "QuestConfirm",
+            Point::new(QUEST_START_POINT.0, QUEST_START_POINT.1),
+        ) {
             // A confirmed quest start ends the failure streak: backoff only
             // measures consecutive *entry* failures.
             if let Some(runtime) = self.event_farm_runtime.as_mut() {
@@ -727,6 +730,9 @@ mod tests {
                 (p.1 * 1080.0).round() as u32,
             )
         };
+        assert_eq!(to_px(NODE_FORWARD), (1370, 320));
+        assert_eq!(to_px(QUEST_START_POINT), (1259, 846));
+        assert_eq!(to_px(CARD_CLOSE), (163, 63));
         assert_eq!(to_px(SKIP_BUTTON), (1786, 60));
         assert_eq!(to_px(SKIP_CONFIRM_YES), (1241, 840));
         assert_eq!(to_px(TAP_ANYWHERE), (960, 400));

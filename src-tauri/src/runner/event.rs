@@ -12,8 +12,11 @@ mod map;
 mod scan;
 mod scout;
 
-pub(crate) use card::{best_farm_quest, QuestCard};
-pub(crate) use farm::{EventFarmPhase, EventFarmRuntime};
+pub(crate) use card::{best_farm_quest, plan_once, EventPlan, QuestCard};
+pub(crate) use farm::{
+    pick_target_card, EventFarmPhase, EventFarmRuntime, NODE_FORWARD, QUEST_START_POINT,
+};
+pub(crate) use map::{hint_ok, label_point, usable_labels};
 pub(crate) use scan::{save_cache, EventScanner};
 
 #[cfg(test)]

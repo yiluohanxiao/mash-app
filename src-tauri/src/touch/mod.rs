@@ -112,6 +112,18 @@ pub fn build(
     backend
 }
 
+/// Humanized ADB-only input for processes that run without the GUI app
+/// (the headless event harness): no scrcpy control socket exists, so taps
+/// go through the ADB backend, with the same product-wide jitter policy.
+pub(crate) fn build_adb_humanized(adb: &Adb, screen_size: (u32, u32)) -> Box<dyn TouchBackend> {
+    let backend: Box<dyn TouchBackend> = Box::new(HumanizedTouch::new(
+        Box::new(adb_input::AdbInputBackend::new(adb.clone(), screen_size)),
+        screen_size,
+    ));
+    eprintln!("[touch] backend selected: {}", backend.name());
+    backend
+}
+
 /// Applies the product-wide touch policy once, at the lowest shared layer.
 /// A single offset is used for both ends of a gesture so its direction and
 /// distance remain stable.

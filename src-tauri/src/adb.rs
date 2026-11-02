@@ -99,6 +99,22 @@ impl Adb {
         }
     }
 
+    /// Build an Adb from an explicit executable path without any managed
+    /// app state (default emulator lookup settings). Used by the headless
+    /// event harness, which runs without the GUI app.
+    pub fn with_path(adb_path: PathBuf, selected_serial: Option<String>) -> Self {
+        Self {
+            adb_path,
+            device: None,
+            selected_serial,
+            display_id: 0,
+            mumu_lookup: std::sync::Arc::new(std::sync::Mutex::new(())),
+            emulator_selection: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::commands::emulator::EmulatorSettings::default(),
+            )),
+        }
+    }
+
     /// Serial of the connected device (populated after `connect`).
     pub fn serial(&self) -> Option<&str> {
         self.device.as_deref()
