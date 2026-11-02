@@ -21,6 +21,7 @@ import { EnhancementPage } from "./features/enhancement/EnhancementPage";
 import { CraftEssenceEnhancementPage } from "./features/craft-essence-enhancement/CraftEssenceEnhancementPage";
 import { FriendPointSummonPage } from "./features/friend-point-summon/FriendPointSummonPage";
 import { RankUpQuestPage } from "./features/rank-up-quest/RankUpQuestPage";
+import { EventFarmPage } from "./features/event-farm/EventFarmPage";
 import { HomePage } from "./features/home/HomePage";
 import { DebugPage } from "./features/debug/DebugPage";
 import { StatusBar } from "./features/status/StatusBar";
@@ -86,6 +87,7 @@ type View =
   | "craftEssenceEnhancement"
   | "friendPointSummon"
   | "rankUpQuest"
+  | "eventFarm"
   | "packetCapture"
   | "debug";
 
@@ -985,6 +987,11 @@ function App({
     setView("rankUpQuest");
   }, []);
 
+  const handleOpenEventFarm = useCallback(() => {
+    if (!featureToggles.eventFarm) return;
+    setView("eventFarm");
+  }, []);
+
   const handleOpenSettings = useCallback(() => {
     if (isNavigationLocked()) return;
     setSettingsSection("basic");
@@ -1083,11 +1090,13 @@ function App({
               showSummon={featureToggles.friendPointSummon}
               showEnhancement={featureToggles.craftEssenceEnhancement}
               showRankUpQuest={featureToggles.rankUpQuest}
+              showEventFarm={featureToggles.eventFarm}
               onSelectFigure={handleSelectHomeFigure}
               onOpenTeam={handleBackToConfig}
               onOpenSummon={handleOpenFriendPointSummon}
               onOpenCraftEssenceEnhancement={handleOpenCraftEssenceEnhancement}
               onOpenRankUpQuest={handleOpenRankUpQuest}
+              onOpenEventFarm={handleOpenEventFarm}
             />
           ) : view === "battle" ? (
             <BattlePage
@@ -1120,6 +1129,16 @@ function App({
             />
           ) : view === "rankUpQuest" && featureToggles.rankUpQuest ? (
             <RankUpQuestPage
+              projects={projects}
+              activeProjectId={activeProjectId}
+              onProjectSelect={handleProjectSelect}
+              onBack={handleOpenHome}
+              onAutomationStart={() => handleBattleAutomationStart(null)}
+              onAutomationStartFailed={handleBattleAutomationStartFailed}
+              onLogEntry={appendOperationLog}
+            />
+          ) : view === "eventFarm" && featureToggles.eventFarm ? (
+            <EventFarmPage
               projects={projects}
               activeProjectId={activeProjectId}
               onProjectSelect={handleProjectSelect}

@@ -27,11 +27,13 @@ function renderHome(overrides: Partial<React.ComponentProps<typeof HomePage>> = 
       showSummon
       showEnhancement
       showRankUpQuest
+      showEventFarm
       onSelectFigure={onSelectFigure}
       onOpenTeam={vi.fn()}
       onOpenSummon={vi.fn()}
       onOpenCraftEssenceEnhancement={vi.fn()}
       onOpenRankUpQuest={vi.fn()}
+      onOpenEventFarm={vi.fn()}
       {...overrides}
     />,
   );
@@ -58,12 +60,22 @@ describe("HomePage", () => {
   });
 
   it("keeps disabled feature entries hidden in both menus", async () => {
-    renderHome({ showSummon: false, showEnhancement: false, showRankUpQuest: false });
+    renderHome({ showSummon: false, showEnhancement: false, showRankUpQuest: false, showEventFarm: false });
     expect(screen.queryByRole("button", { name: "召唤" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "强化" })).not.toBeInTheDocument();
     await userEvent.setup().click(screen.getByRole("button", { name: "战斗" }));
     expect(screen.getByRole("button", { name: "编队/开始" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "强化任务" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "活动刷本" })).not.toBeInTheDocument();
+  });
+
+  it("routes the event farm card to its action", async () => {
+    const onOpenEventFarm = vi.fn();
+    renderHome({ onOpenEventFarm });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "战斗" }));
+    await user.click(screen.getByRole("button", { name: "活动刷本" }));
+    expect(onOpenEventFarm).toHaveBeenCalledOnce();
   });
 
   it("returns from the battle menu with an icon-only heading button", async () => {

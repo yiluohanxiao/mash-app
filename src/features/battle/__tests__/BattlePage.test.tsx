@@ -155,29 +155,6 @@ function renderBattlePage(
 }
 
 describe("BattlePage", () => {
-  it("starts event farm automation when the event switch is on", async () => {
-    const user = userEvent.setup();
-    mockProjectCommands();
-    renderBattlePage(PROJECT);
-
-    await user.click(
-      await screen.findByRole("switch", { name: "活动自动刷本模式" })
-    );
-    await user.click(screen.getByRole("button", { name: "开始任务" }));
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("start_event_farm_automation", {
-        config: expect.objectContaining({
-          projectId: "project-1",
-          eventFarm: {},
-        }),
-      });
-    });
-    expect(
-      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "start_automation")
-    ).toBe(false);
-  });
-
   it("explains AP recovery limits from the heading help icon", async () => {
     const user = userEvent.setup();
     mockProjectCommands();

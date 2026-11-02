@@ -8,7 +8,6 @@ import {
   Button,
   CheckboxCards,
   Flex,
-  Switch,
   Text,
   TextField,
 } from "@radix-ui/themes";
@@ -219,8 +218,6 @@ export function BattlePage({
   const [running, setRunning] = useState(false);
   const [rainbowConfirmOpen, setRainbowConfirmOpen] = useState(false);
   const [stopAfterCurrentRequested, setStopAfterCurrentRequested] = useState(false);
-  // Transient: event-farm mode is a per-launch choice, not project state.
-  const [eventFarmMode, setEventFarmMode] = useState(false);
   const [draft, setDraft] = useState<BattleProjectDraft | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
   const draftRef = useRef<BattleProjectDraft | null>(null);
@@ -301,18 +298,13 @@ export function BattlePage({
       apRecoveryLimits: latestDraft.apRecoveryLimits,
     });
 
-    const command = eventFarmMode
-      ? "start_event_farm_automation"
-      : "start_automation";
-    const payload = eventFarmMode ? { ...config, eventFarm: {} } : config;
-    invoke(command, { config: payload }).catch((err) => {
+    invoke("start_automation", { config }).catch((err) => {
       onLogEntry?.(`启动失败: ${String(err)}`);
       onAutomationStartFailed?.();
       setRunning(false);
       setStopAfterCurrentRequested(false);
     });
   }, [
-    eventFarmMode,
     onAutomationStart,
     onAutomationStartFailed,
     onLogEntry,
@@ -661,18 +653,6 @@ export function BattlePage({
       </Flex>
 
       <Flex justify="end" align="center" className="battle-footer" gap="3">
-        <Flex align="center" gap="2">
-          <Switch
-            checked={eventFarmMode}
-            onCheckedChange={(checked) => setEventFarmMode(checked)}
-            disabled={running}
-            aria-label="活动自动刷本模式"
-          />
-          <Text size="2" weight="medium">
-            活动刷本
-          </Text>
-          <HelpTooltip content="打开后从活动地图自动选本进关（需先在游戏中打开活动地图）；队伍与助战沿用当前项目配置。结束后自动停止。" />
-        </Flex>
         <Flex align="center" justify="end" className="battle-task-actions">
           {running && (
             <>
