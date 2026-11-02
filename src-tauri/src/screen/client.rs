@@ -289,6 +289,18 @@ impl SidecarClient {
         );
     }
 
+    /// Scope detection to the event-farm loop: battle screens plus the
+    /// event map / terminal / quest-card screens.
+    pub fn use_event_detection(&mut self) {
+        self.detection_screens = Some(
+            super::types::BATTLE_DETECTION_SCREENS
+                .iter()
+                .chain(super::types::EVENT_ONLY_DETECTION_SCREENS.iter())
+                .map(|name| name.to_string())
+                .collect(),
+        );
+    }
+
     fn check_response(&mut self, response: &serde_json::Value) -> CvResult<()> {
         if let Some(error) = template_response_error(response) {
             self.healthy = false;

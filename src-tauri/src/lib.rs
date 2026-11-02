@@ -266,6 +266,7 @@ pub fn run() {
             recognition_diagnostics::delete_recognition_diagnostic,
             recognition_diagnostics::clear_recognition_diagnostics,
             commands::debug::debug_capture,
+            commands::debug::debug_scan_event_map,
             commands::debug::debug_stream_connect,
             commands::debug::debug_stream_disconnect,
             commands::debug::debug_stream_frame,

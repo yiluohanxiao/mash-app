@@ -194,7 +194,31 @@ impl Runner {
                     last_detected_screen = screen;
                     self.handle_ap_recovery()?;
                 }
-                Screen::Unknown => {
+                // Event-farm screens are only produced when the sidecar runs
+                // the event detection scope. This runner has no routing for
+                // them yet, so they share the unknown-frame handling: wait,
+                // count toward the recognition timeout, never tap.
+                Screen::Unknown
+                | Screen::EventMap
+                | Screen::Terminal
+                | Screen::NodeDetail
+                | Screen::QuestConfirm
+                | Screen::Story
+                | Screen::SkipConfirm
+                | Screen::TapContinue
+                | Screen::Loading
+                | Screen::Title
+                | Screen::Defeat
+                | Screen::Busy
+                | Screen::Cg
+                | Screen::RewardSelect
+                | Screen::RewardPage
+                | Screen::ServantFull
+                | Screen::Gate
+                | Screen::Tip
+                | Screen::PartyConfirm
+                | Screen::RepeatConfirm
+                | Screen::ListUpdate => {
                     unknown_count += 1;
                     let timeout = self.config.unknown_screen_timeout_count;
                     if unknown_count >= timeout {

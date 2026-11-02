@@ -6,17 +6,20 @@
 //! full-page swipe and looks jittery while it does.
 //!
 //! Kept as the initialization fallback and explicit `MASH_TOUCH_BACKEND=adb` baseline.
+//! Pinch is the one gesture `input` cannot express, so it drops to raw
+//! multi-touch `sendevent` samples (see [`crate::adb::Adb::pinch`]).
 
 use crate::adb::Adb;
 use crate::touch::TouchBackend;
 
 pub struct AdbInputBackend {
     adb: Adb,
+    screen_size: (u32, u32),
 }
 
 impl AdbInputBackend {
-    pub fn new(adb: Adb) -> Self {
-        Self { adb }
+    pub fn new(adb: Adb, screen_size: (u32, u32)) -> Self {
+        Self { adb, screen_size }
     }
 }
 
@@ -37,6 +40,17 @@ impl TouchBackend for AdbInputBackend {
         settle_ms: u32,
     ) -> Result<(), String> {
         self.adb.swipe_with_settle(from, to, swipe_ms, settle_ms)
+    }
+
+    fn pinch(
+        &mut self,
+        center: (u32, u32),
+        from_gap: u32,
+        to_gap: u32,
+        duration_ms: u32,
+    ) -> Result<(), String> {
+        self.adb
+            .pinch(center, from_gap, to_gap, duration_ms, self.screen_size)
     }
 
     fn name(&self) -> &'static str {

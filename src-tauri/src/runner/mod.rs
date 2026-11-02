@@ -9,6 +9,11 @@ mod config;
 mod coords;
 mod diagnostics;
 mod engine;
+// Event-map navigation is exercised from M2's automation loop; until
+// then its pure pieces are covered by unit tests only.
+#[allow(dead_code)]
+mod event;
+pub(crate) use event::*;
 mod fault_injection;
 mod grand;
 mod party;

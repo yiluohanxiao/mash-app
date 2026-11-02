@@ -1,5 +1,5 @@
 {
-  "$comment": "Screen + variant + element template mapping. All coordinates are normalized (0.0..1.0). 'template' refers to a PNG filename (without extension) in resources/templates/. Detection is template matching: for each screen, find its 'detect' template within its region at >= threshold; the highest-scoring screen wins. Every screen has at least variants.main. Variants describe alternate views of the same screen; elements are used for interactions and status probes.",
+  "$comment": "Screen + variant + element template mapping. All coordinates are normalized (0.0..1.0). 'template' refers to a PNG filename (without extension) in resources/templates/. Detection runs three passes in order, and the first pass with a match wins: template probes (find the 'detect' template within its region at >= threshold), then OCR-keyword probes, then frame-brightness probes ('blank', the mean 0..255 over the whole frame). Keyword screens use 'keywords' (any one matches) or 'keywordGroups' (all groups must match) with an optional 'minScore' OCR-confidence floor, and rank by 'priority' (higher wins) then score. Every screen has at least variants.main. Variants describe alternate views of the same screen; elements are used for interactions and status probes. Event-farm screens at the end of this file are CN-only and rely on Chinese OCR text.",
   "screens": {
     "RankUpQuest": {
       "detect": {
@@ -610,6 +610,214 @@
           }
         }
       }
+    },
+    "EventMap": {
+      "detect": {
+        "keywords": ["管理室"],
+        "region": { "x": 0.0, "y": 0.0, "w": 0.2448, "h": 0.1389 },
+        "minScore": 0.5,
+        "priority": 60
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "Terminal": {
+      "detect": {
+        "keywords": ["通知"],
+        "region": { "x": 0.0, "y": 0.0, "w": 0.2448, "h": 0.1389 },
+        "minScore": 0.5,
+        "priority": 55
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "NodeDetail": {
+      "detect": {
+        "keywordGroups": [
+          {
+            "anyOf": ["关闭"],
+            "region": { "x": 0.0, "y": 0.0, "w": 0.2448, "h": 0.1389 }
+          },
+          {
+            "anyOf": ["消耗", "任务进行度", "首次报酬", "推荐"],
+            "region": { "x": 0.5208, "y": 0.1389, "w": 0.4688, "h": 0.25 }
+          }
+        ],
+        "minScore": 0.5,
+        "priority": 30
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "QuestConfirm": {
+      "detect": {
+        "keywords": [
+          "是否开始",
+          "开始关卡",
+          "是否开始任务",
+          "该任务没有战斗",
+          "任务开始",
+          "败北",
+          "无法在",
+          "该关卡中"
+        ],
+        "region": { "x": 0.2344, "y": 0.3426, "w": 0.5469, "h": 0.4907 },
+        "minScore": 0.5,
+        "priority": 50
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "Story": {
+      "detect": {
+        "keywords": ["跳过"],
+        "region": { "x": 0.7188, "y": 0.0139, "w": 0.2812, "h": 0.088 },
+        "minScore": 0.5,
+        "priority": 45
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "SkipConfirm": {
+      "detect": {
+        "keywordGroups": [
+          {
+            "anyOf": ["跳过"],
+            "region": { "x": 0.7188, "y": 0.0139, "w": 0.2812, "h": 0.088 }
+          },
+          {
+            "anyOf": ["是否跳过", "跳过该段"],
+            "region": { "x": 0.3125, "y": 0.3426, "w": 0.4271, "h": 0.2222 }
+          }
+        ],
+        "minScore": 0.5,
+        "priority": 46
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "TapContinue": {
+      "detect": {
+        "keywords": ["请点击游戏界面"],
+        "region": { "x": 0.3125, "y": 0.8565, "w": 0.375, "h": 0.088 },
+        "minScore": 0.5,
+        "priority": 35
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "Loading": {
+      "detect": {
+        "keywords": ["加载中"],
+        "region": { "x": 0.6719, "y": 0.8935, "w": 0.1927, "h": 0.088 },
+        "blank": { "maxBrightness": 45 },
+        "minScore": 0.5,
+        "priority": 20
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "Title": {
+      "detect": {
+        "keywords": ["版本号"],
+        "region": { "x": 0.0, "y": 0.9259, "w": 0.2188, "h": 0.0694 },
+        "minScore": 0.5,
+        "priority": 70
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "Defeat": {
+      "detect": {
+        "keywords": ["使用圣晶石继续", "圣晶石继续", "撤退"],
+        "region": { "x": 0.3125, "y": 0.8148, "w": 0.4688, "h": 0.1667 },
+        "minScore": 0.5,
+        "priority": 80
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "Busy": {
+      "detect": {
+        "keywords": ["该操作无效"],
+        "region": { "x": 0.3125, "y": 0.7917, "w": 0.3646, "h": 0.088 },
+        "minScore": 0.5,
+        "priority": 15
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "ServantFull": {
+      "detect": {
+        "keywords": ["从者数已超上限", "从者空位"],
+        "region": { "x": 0.26042, "y": 0.13889, "w": 0.49479, "h": 0.17593 },
+        "minScore": 0.5,
+        "priority": 78
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "RewardSelect": {
+      "$comment": "The terminal's 通知 text is still visible behind this dialog, so it must outrank Terminal.",
+      "detect": {
+        "keywords": ["活动奖励画面选择"],
+        "region": { "x": 0.09375, "y": 0.02315, "w": 0.64583, "h": 0.11111 },
+        "minScore": 0.5,
+        "priority": 75
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "Gate": {
+      "$comment": "Free-quest list. Same 关闭 button as NodeDetail, so it must be checked first or blind taps land on card arrows.",
+      "detect": {
+        "keywordGroups": [
+          { "anyOf": ["迦勒底之门", "迦勒底之", "勒底之"], "region": { "x": 0.71875, "y": 0.01389, "w": 0.28125, "h": 0.08796 } },
+          { "anyOf": ["关闭"], "region": { "x": 0.0, "y": 0.0, "w": 0.24479, "h": 0.13889 } }
+        ],
+        "minScore": 0.5,
+        "priority": 65
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "Tip": {
+      "detect": {
+        "keywords": ["该支援角色不存在", "小贴士"],
+        "region": { "x": 0.26042, "y": 0.23148, "w": 0.49479, "h": 0.34259 },
+        "minScore": 0.5,
+        "priority": 48
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "PartyConfirm": {
+      "$comment": "The confirm title sits in the top-right band, next to 确认. OCR splits it there into 冠位编队 + 确认, so the title band is the only region where the four characters stay in one fragment.",
+      "detect": {
+        "keywords": ["冠位编队", "助战编队", "冠位编", "助战编"],
+        "region": { "x": 0.71875, "y": 0.01389, "w": 0.28125, "h": 0.08796 },
+        "minScore": 0.5,
+        "priority": 44
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "ListUpdate": {
+      "$comment": "Dialog drawn over the support list, so the shared support-list template still matches it. `overrides` makes the template hit re-check this keyword probe.",
+      "detect": {
+        "keywords": ["将更新", "成员列表"],
+        "overrides": ["SupportSelect"],
+        "region": { "x": 0.3125, "y": 0.34259, "w": 0.42708, "h": 0.22222 },
+        "minScore": 0.5,
+        "priority": 43
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "RepeatConfirm": {
+      "detect": {
+        "keywords": ["连续进行同一关卡", "连续出击"],
+        "region": { "x": 0.26042, "y": 0.12963, "w": 0.49479, "h": 0.24074 },
+        "minScore": 0.5,
+        "priority": 42
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "RewardPage": {
+      "detect": {
+        "keywords": ["点数报酬", "道具兑换"],
+        "region": { "x": 0.46875, "y": 0.14815, "w": 0.53125, "h": 0.09259 },
+        "minScore": 0.5,
+        "priority": 40
+      },
+      "variants": { "main": { "elements": {} } }
+    },
+    "Cg": {
+      "$comment": "Reserved: full-screen CG/animation has no readable text, so it stays undetected and is observed as Unknown (wait, never tap).",
+      "variants": { "main": { "elements": {} } }
     }
   }
 }

@@ -24,6 +24,17 @@ def gesture():
     ]
 
 
+def pinch_gesture():
+    return [
+        {"action": 0, "pointerId": 0, "x": 810, "y": 540, "atMs": 0},
+        {"action": 0, "pointerId": 1, "x": 1110, "y": 540, "atMs": 0},
+        {"action": 2, "pointerId": 0, "x": 900, "y": 540, "atMs": 150},
+        {"action": 2, "pointerId": 1, "x": 1020, "y": 540, "atMs": 150},
+        {"action": 1, "pointerId": 0, "x": 930, "y": 540, "atMs": 300},
+        {"action": 1, "pointerId": 1, "x": 990, "y": 540, "atMs": 300},
+    ]
+
+
 def test_wire_packet_matches_scrcpy_27_big_endian_layout():
     packet = touch_packet(0, 256, 512, 1920, 1080)
     assert packet.hex() == "02000000000000000000000001000000020007800438ffff0000000000000000"
@@ -31,6 +42,46 @@ def test_wire_packet_matches_scrcpy_27_big_endian_layout():
     assert struct.unpack(">BBQiiHHHII", touch_packet(1, 256, 512, 1920, 1080)) == (
         2, 1, 0, 256, 512, 1920, 1080, 0, 0, 0,
     )
+    assert struct.unpack(">BBQiiHHHII", touch_packet(0, 256, 512, 1920, 1080, 7))[2] == 7
+
+
+def test_two_pointer_pinch_sends_distinct_ids_and_releases_both(monkeypatch):
+    monkeypatch.setattr(scrcpy_control.time, "sleep", lambda _: None)
+    sock = RecordingSocket()
+    ScrcpyControl(sock).send(pinch_gesture(), 1920, 1080)
+    packets = [struct.unpack(">BBQiiHHHII", packet) for packet in sock.packets]
+    assert [(packet[1], packet[2]) for packet in packets] == [
+        (0, 0), (0, 1), (2, 0), (2, 1), (1, 0), (1, 1),
+    ]
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda events: events[2].update(pointerId=5),      # MOVE for a finger that is not down
+    lambda events: events.pop(),                       # pointer 1 never released
+    lambda events: events[1].update(pointerId=0),      # duplicate DOWN for pointer 0
+    lambda events: events.pop(0),                      # gesture must start with DOWN
+    lambda events: events[0].update(pointerId=10),     # scrcpy supports ten fingers
+    lambda events: events[3].update(action=1, atMs=300, x=990),  # UP for an already-released finger
+])
+def test_multi_pointer_validation_rejects_unbalanced_gestures(mutate):
+    events = pinch_gesture()
+    mutate(events)
+    sock = RecordingSocket()
+    with pytest.raises(ValueError):
+        ScrcpyControl(sock).send(events, 1920, 1080)
+    assert not sock.packets
+
+
+def test_interrupted_pinch_releases_every_pressed_pointer(monkeypatch):
+    monkeypatch.setattr(scrcpy_control.time, "sleep", lambda _: None)
+    sock = RecordingSocket(fail_at=3)
+    control = ScrcpyControl(sock)
+    with pytest.raises(BrokenPipeError):
+        control.send(pinch_gesture(), 1920, 1080)
+    packets = [struct.unpack(">BBQiiHHHII", packet) for packet in sock.packets]
+    assert [(packet[1], packet[2]) for packet in packets] == [
+        (0, 0), (0, 1), (2, 0), (1, 0), (1, 1),
+    ]
 
 
 def test_gesture_uses_absolute_deadlines_and_real_socket(monkeypatch):
