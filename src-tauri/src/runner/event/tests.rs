@@ -1,5 +1,5 @@
 use super::cache::{ScanCache, SCAN_CACHE_MAX_AGE};
-use super::card::{best_farm_quest, QuestCard};
+use super::card::{best_farm_quest, excluded_label, plan_once, EventPlan, QuestCard, BAD_LIMIT};
 use super::map::{
     hint_ok, is_boundary, label_point, mean_abs_diff, pan_swipe, usable_labels, Axis,
     MapNavigator,
@@ -7,6 +7,7 @@ use super::map::{
 use super::scout::{delta_targets, merge_delta};
 use crate::screen::MapLabel;
 use crate::touch::TouchBackend;
+use std::collections::HashMap;
 
 fn card(name: &str, level: u32, plus: u32, ap: u32, locked: bool, label: &str) -> QuestCard {
     QuestCard {
@@ -96,6 +97,109 @@ fn best_farm_quest_keeps_map_order_on_ties() {
         card("后出现", 90, 2, 40, false, "b"),
     ];
     assert_eq!(best_farm_quest(&cards).unwrap().name, "先出现");
+}
+
+// ---------------------------------------------------------------- plan
+
+fn story(name: &str, level: u32, locked: bool, label: &str, threshold: u32) -> QuestCard {
+    let mut card = card(name, level, 0, 0, locked, label);
+    if threshold > 0 {
+        card.cond = format!("开放条件：点数达 {threshold} 以上");
+    }
+    card
+}
+
+#[test]
+fn plan_grinds_points_while_the_next_story_threshold_is_out_of_reach() {
+    let cards = vec![
+        story("主线第二节", 0, true, "s2", 12_000),
+        card("刷点本90+", 90, 1, 40, false, "f"),
+    ];
+    let plan = plan_once(&cards, Some(5_000), &HashMap::new()).unwrap();
+    match plan {
+        EventPlan::Farm(card) => assert_eq!(card.name, "刷点本90+"),
+        EventPlan::Story(_) => panic!("点数不足时应先刷点"),
+    }
+}
+
+#[test]
+fn plan_enters_the_locked_story_once_its_threshold_is_reached() {
+    let cards = vec![
+        story("主线第二节", 0, true, "s2", 12_000),
+        story("主线第一节", 0, true, "s1", 3_000),
+        card("刷点本90+", 90, 1, 40, false, "f"),
+    ];
+    // The cheapest threshold wins; at 3_000 points 第一节 is enterable.
+    let plan = plan_once(&cards, Some(3_000), &HashMap::new()).unwrap();
+    match plan {
+        EventPlan::Story(card) => assert_eq!(card.name, "主线第一节"),
+        EventPlan::Farm(_) => panic!("点数达标后应推进主线"),
+    }
+}
+
+#[test]
+fn plan_pushes_the_lowest_unlocked_story_before_farming() {
+    let cards = vec![
+        story("主线第三节", 1, false, "s3", 0),
+        story("主线第二节", 0, false, "s2", 0),
+        card("刷点本90+", 90, 1, 40, false, "f"),
+    ];
+    let plan = plan_once(&cards, Some(0), &HashMap::new()).unwrap();
+    match plan {
+        EventPlan::Story(card) => assert_eq!(card.name, "主线第二节"),
+        EventPlan::Farm(_) => panic!("有解锁主线时应先推主线"),
+    }
+}
+
+#[test]
+fn plan_farms_when_story_is_done_or_absent() {
+    let cards = vec![card("刷点本90+", 90, 1, 40, false, "f")];
+    match plan_once(&cards, Some(99_999), &HashMap::new()).unwrap() {
+        EventPlan::Farm(card) => assert_eq!(card.name, "刷点本90+"),
+        EventPlan::Story(_) => panic!("没有主线时只能刷点"),
+    }
+    // Unreadable points count as 0 — still farm, never stall.
+    assert!(matches!(
+        plan_once(&cards, None, &HashMap::new()).unwrap(),
+        EventPlan::Farm(_)
+    ));
+}
+
+#[test]
+fn plan_errors_when_nothing_is_usable() {
+    let cards = vec![story("主线第一节", 0, true, "s1", 3_000)];
+    assert!(plan_once(&cards, Some(0), &HashMap::new()).is_err());
+
+    let only_challenge = vec![card("高难度90++", 90, 3, 40, false, "h")];
+    assert!(plan_once(&only_challenge, Some(0), &HashMap::new()).is_err());
+}
+
+#[test]
+fn plan_skips_blacklisted_labels_in_every_branch() {
+    let mut bad = HashMap::new();
+    bad.insert("f".to_string(), BAD_LIMIT);
+    bad.insert("s2".to_string(), BAD_LIMIT);
+
+    // Locked story s2 blacklisted → no locked story left; unlocked story
+    // absent → farm, but best farm quest is blacklisted too → error.
+    let cards = vec![
+        story("主线第二节", 0, true, "s2", 0),
+        card("刷点本90+", 90, 1, 40, false, "f"),
+    ];
+    assert!(plan_once(&cards, Some(9_999), &bad).is_err());
+
+    // A second farm quest survives and takes over.
+    let cards = vec![
+        card("刷点本90+", 90, 1, 40, false, "f"),
+        card("备用本80", 80, 0, 40, false, "g"),
+    ];
+    match plan_once(&cards, Some(0), &bad).unwrap() {
+        EventPlan::Farm(card) => assert_eq!(card.label, "g"),
+        EventPlan::Story(_) => panic!("备用本才是可用刷点关"),
+    }
+
+    assert!(excluded_label(&bad, "f"));
+    assert!(!excluded_label(&bad, "g"));
 }
 
 // ---------------------------------------------------------------- map

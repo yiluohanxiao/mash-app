@@ -6,13 +6,20 @@
 //! ranks them.
 
 use crate::screen::QuestCardResult;
+use std::collections::HashMap;
 
 /// AP at or above this is a farming node (reference: `FARM_AP`).
 pub(crate) const FARM_AP: u32 = 20;
 /// AP at or below this is a story/challenge node (reference: `STORY_AP`).
-/// Consumed by the M3/M4 point-strategy planner; pinned by unit tests today.
-#[allow(dead_code)]
 pub(crate) const STORY_AP: u32 = 10;
+/// A label that failed this many consecutive quests is skipped for the rest
+/// of the run (reference `flow.BAD_LIMIT`, in-memory only).
+pub(crate) const BAD_LIMIT: u32 = 2;
+
+/// Whether a label has burned its failure budget for this run.
+pub(crate) fn excluded_label(bad: &HashMap<String, u32>, label: &str) -> bool {
+    bad.get(label).is_some_and(|count| *count >= BAD_LIMIT)
+}
 
 /// A quest card read from the map's card box.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -66,8 +73,6 @@ impl QuestCard {
     /// Story nodes are low-AP and are not high-difficulty challenges.
     /// The name alone cannot decide: an unlocked story card shows the
     /// quest title, while a locked one shows `主线关卡第N节`.
-    /// M3/M4 point-strategy surface; pinned by unit tests today.
-    #[allow(dead_code)]
     pub(crate) fn is_story(&self) -> bool {
         if self.name.contains("高难度") || self.name.to_uppercase().contains("LIVE FES") {
             return false;
@@ -75,8 +80,6 @@ impl QuestCard {
         self.ap <= STORY_AP
     }
 
-    /// M3/M4 point-strategy surface; pinned by unit tests today.
-    #[allow(dead_code)]
     pub(crate) fn is_farm(&self) -> bool {
         self.ap >= FARM_AP
     }
@@ -84,8 +87,6 @@ impl QuestCard {
     /// Event points required to unlock the card, or 0 when unconstrained.
     /// Mirrors the reference `点数达 X 以上` extraction; unit suffixes
     /// such as `万` are deliberately not interpreted, same as upstream.
-    /// M3/M4 point-strategy surface; pinned by unit tests today.
-    #[allow(dead_code)]
     pub(crate) fn threshold(&self) -> u32 {
         let Some(start) = self.cond.find("点数达") else {
             return 0;
@@ -101,14 +102,6 @@ impl QuestCard {
             .parse()
             .unwrap_or(0)
     }
-
-    /// Failure-blacklist key. Same name at a different level/AP is a
-    /// different node and must not share the counter.
-    /// M3/M4 blacklist surface (in-memory only); pinned by unit tests today.
-    #[allow(dead_code)]
-    pub(crate) fn bad_key(&self) -> String {
-        format!("{}|{}|{}", self.name, self.level_text(), self.ap)
-    }
 }
 
 /// Highest recommended level among unlocked farming nodes.
@@ -123,4 +116,69 @@ pub(crate) fn best_farm_quest(cards: &[QuestCard]) -> Option<&QuestCard> {
         .collect();
     pool.sort_by(|a, b| (b.level_key(), b.ap).cmp(&(a.level_key(), a.ap)));
     pool.first().copied()
+}
+
+/// What `plan_once` decided to do next (reference `flow.plan_once`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EventPlan {
+    /// Grind points on the best farm quest.
+    Farm(QuestCard),
+    /// Advance the main story.
+    Story(QuestCard),
+}
+
+/// Decide the next quest from the current cards and event points, mirroring
+/// the reference `plan_once`:
+///
+/// 1. Locked story nodes exist and the cheapest threshold is reached
+///    (points included) — enter it; the game unlocks at the threshold.
+/// 2. Locked story nodes exist but points are short — grind the best farm
+///    quest first.
+/// 3. Unlocked story nodes exist — push the lowest-level one.
+/// 4. Otherwise — grind the best farm quest.
+///
+/// Blacklisted labels are excluded before every step; nothing usable
+/// returns an error, which stops the run.
+pub(crate) fn plan_once(
+    cards: &[QuestCard],
+    points: Option<u32>,
+    bad: &HashMap<String, u32>,
+) -> Result<EventPlan, String> {
+    let pts = points.unwrap_or(0);
+    let usable: Vec<QuestCard> = cards
+        .iter()
+        .filter(|card| !excluded_label(bad, &card.label))
+        .cloned()
+        .collect();
+
+    let locked_story: Vec<&QuestCard> = usable
+        .iter()
+        .filter(|card| card.locked && card.is_story())
+        .collect();
+    if let Some(target) = locked_story.iter().min_by_key(|card| {
+        let threshold = card.threshold();
+        (if threshold == 0 { u32::MAX } else { threshold }, card.level_key())
+    }) {
+        let need = target.threshold();
+        if need > 0 && pts < need {
+            return best_farm_quest(&usable)
+                .cloned()
+                .map(EventPlan::Farm)
+                .ok_or_else(|| format!("「{}」需要点数 {need}，当前 {pts}，且没有可打的刷点关卡", target.name));
+        }
+        return Ok(EventPlan::Story((*target).clone()));
+    }
+
+    if let Some(target) = usable
+        .iter()
+        .filter(|card| !card.locked && card.is_story())
+        .min_by_key(|card| card.level_key())
+    {
+        return Ok(EventPlan::Story(target.clone()));
+    }
+
+    best_farm_quest(&usable)
+        .cloned()
+        .map(EventPlan::Farm)
+        .ok_or_else(|| "地图上没有可推进的关卡（主线可能已通关，也没有可打的活动本）".into())
 }

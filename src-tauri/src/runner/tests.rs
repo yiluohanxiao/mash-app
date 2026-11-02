@@ -6403,6 +6403,51 @@ fn ap_recovery_limits_report_no_candidate_after_every_cap_is_reached() {
 }
 
 #[test]
+fn event_mode_never_offers_premium_items_and_caps_apples() {
+    let limits = event_mode_ap_recovery_limits(ApRecoveryLimits {
+        gold: Some(99),
+        rainbow: Some(99),
+        silver: None,
+        bronze: Some(3),
+        copper: Some(20),
+        ..Default::default()
+    });
+    assert_eq!(limits.gold, Some(0));
+    assert_eq!(limits.rainbow, Some(0));
+    assert_eq!(limits.silver, Some(EVENT_APPLE_LIMIT));
+    assert_eq!(limits.bronze, Some(3));
+    assert_eq!(limits.copper, Some(EVENT_APPLE_LIMIT));
+
+    // Configured silver above the cap is clamped, not honored.
+    let limits = event_mode_ap_recovery_limits(ApRecoveryLimits {
+        silver: Some(50),
+        ..Default::default()
+    });
+    assert_eq!(limits.silver, Some(EVENT_APPLE_LIMIT));
+}
+
+#[test]
+fn event_mode_stops_once_every_allowed_apple_is_exhausted() {
+    let limits = event_mode_ap_recovery_limits(ApRecoveryLimits::default());
+    let usage = BattleRunApRecoveryUsage {
+        silver: EVENT_APPLE_LIMIT,
+        bronze: EVENT_APPLE_LIMIT,
+        copper: EVENT_APPLE_LIMIT,
+        ..Default::default()
+    };
+    assert!(available_ap_recovery_items(&EVENT_AP_RECOVERY_ITEMS, limits, &usage).is_empty());
+
+    let usage = BattleRunApRecoveryUsage {
+        silver: EVENT_APPLE_LIMIT - 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        available_ap_recovery_items(&EVENT_AP_RECOVERY_ITEMS, limits, &usage),
+        vec![ApRecoveryItem::Silver, ApRecoveryItem::Bronze, ApRecoveryItem::Copper]
+    );
+}
+
+#[test]
 fn ap_recovery_waits_half_a_second_between_item_and_confirmation_steps() {
     assert_eq!(AP_RECOVERY_TAP_SETTLE, Duration::from_millis(500));
 }

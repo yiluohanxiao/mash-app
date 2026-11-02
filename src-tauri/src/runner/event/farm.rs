@@ -18,7 +18,9 @@
 //! back off (5/10/20/40/60s) before picking another card.
 
 use super::cache::{ScanCache, SCAN_CACHE_MAX_AGE};
-use super::card::QuestCard;
+use super::card::{
+    best_farm_quest, excluded_label, plan_once, EventPlan, QuestCard, BAD_LIMIT,
+};
 use super::map;
 use super::scan::{save_cache, EventScanner};
 use crate::automation_error::AutomationResult;
@@ -57,9 +59,6 @@ const SERVANT_FULL_CLOSE: (f64, f64) = (860.0 / 1920.0, 720.0 / 1080.0);
 /// gives up on that card instead of silently burning AP on a half-understood
 /// map.
 const MAX_CARD_ATTEMPTS: u32 = 3;
-/// A label that failed this many consecutive quests is skipped for the rest
-/// of the run (reference `flow.BAD_LIMIT`, in-memory only).
-pub(crate) const BAD_LIMIT: u32 = 2;
 /// `PartyConfirm` is never auto-confirmed; this many consecutive
 /// observations instead stop the run so the user can confirm the party.
 const PARTY_CONFIRM_MAX_OBSERVATIONS: u32 = 40;
@@ -123,16 +122,11 @@ pub(crate) fn pick_target_card(
     target: Option<&str>,
     bad_labels: &HashMap<String, u32>,
 ) -> Result<QuestCard, String> {
-    let excluded = |label: &str| {
-        bad_labels
-            .get(label)
-            .is_some_and(|count| *count >= BAD_LIMIT)
-    };
     if let Some(target) = target.filter(|t| !t.trim().is_empty()) {
         let matches: Vec<&QuestCard> = cards
             .iter()
             .filter(|card| {
-                !card.locked && !excluded(&card.label) && map::hint_ok(&card.name, target)
+                !card.locked && !excluded_label(bad_labels, &card.label) && map::hint_ok(&card.name, target)
             })
             .collect();
         return matches
@@ -143,10 +137,10 @@ pub(crate) fn pick_target_card(
     }
     let candidates: Vec<QuestCard> = cards
         .iter()
-        .filter(|card| !excluded(&card.label))
+        .filter(|card| !excluded_label(bad_labels, &card.label))
         .cloned()
         .collect();
-    super::card::best_farm_quest(&candidates)
+    best_farm_quest(&candidates)
         .cloned()
         .ok_or_else(|| "扫描结果里没有可打的活动关卡（全部锁定、拉黑或 AP 不足）".into())
 }
@@ -581,11 +575,42 @@ impl Runner {
             })
             .unwrap_or((None, false, HashMap::new()));
         let cards = self.event_scan_cards(rescan)?;
-        let card = pick_target_card(&cards, target.as_deref(), &bad_labels)?;
+        let card = match target.as_deref().filter(|t| !t.trim().is_empty()) {
+            Some(target) => pick_target_card(&cards, Some(target), &bad_labels)?,
+            None => match plan_once(&cards, self.read_event_points_live(), &bad_labels)? {
+                EventPlan::Story(card) => {
+                    self.emit(
+                        "EventMap",
+                        &format!("推进主线「{}」", card.name),
+                    );
+                    card
+                }
+                EventPlan::Farm(card) => {
+                    self.emit(
+                        "EventMap",
+                        &format!("刷活动点数：「{}」等级{}", card.name, card.level_text()),
+                    );
+                    card
+                }
+            },
+        };
         if let Some(runtime) = self.event_farm_runtime.as_mut() {
             runtime.rescan_needed = false;
         }
         Ok(card)
+    }
+
+    /// Live point read for the planner. Unreadable points count as 0,
+    /// which makes the plan grind the farm quest — the safe direction
+    /// (never skip farming in order to rush a locked story node).
+    fn read_event_points_live(&mut self) -> Option<u32> {
+        match self.sidecar().read_event_points(None) {
+            Ok(result) => result.points,
+            Err(error) => {
+                self.emit_warn("EventMap", &format!("读取活动点数失败，按 0 处理: {error}"));
+                None
+            }
+        }
     }
 
     fn find_event_label_point(&mut self, text: &str) -> Result<Option<(u32, u32)>, String> {
