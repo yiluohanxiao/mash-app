@@ -352,7 +352,7 @@ Python 编码与校验；ADB `sendevent` MT-B 作为备用后端，仅当 scrcpy
 | **M0**（已完成 2026-11-02） | 装工具链；新增 M0 的 `Screen` + `cv.json` + 关键词检测；corpus 离线回归 | `cargo test` / `pnpm build` 通过；已实现画面的 corpus 正/负样本全通过（见第 9 节） |
 | **M1**（代码完成 2026-11-02，待实机验收） | 捏合、拖动、边界、归位、标签 OCR、关卡卡解析、扫图缓存 | 实机扫出 8 个标签；卡片名称/等级/AP/锁定与手工核对一致；缓存 3 小时生效 |
 | **M2**（代码完成 2026-11-03，待实机验收） | 选本 + 进关：点标签 → 开卡 → ▶ → 确认 → 交给现有 Runner | 从地图进入战斗，全程无人工；`SupportSelect` 起由 mash 接管 |
-| **M3** | 循环：结算 → 回地图 → 下一轮；失败/掉线恢复 | 连续打 5 个本不中断；全灭只停不复活 |
+| **M3**（代码完成 2026-11-03，待实机验收） | 循环：结算 → 回地图 → 下一轮；失败/掉线恢复 | 连续打 5 个本不中断；全灭只停不复活 |
 | **M4** | AP 检查、苹果、等回复、掉落目标 | 配置生效；圣晶石永远不在默认顺序；`max_total` 与等待预算正确 |
 | **M5** | 每日任务 / 周常（可选） | 按档位/篇选本，不看 AP |
 | **M6** | 打包 / 诊断包 / 文档 | Windows 安装包可跑；失败现场可导出 |
@@ -523,3 +523,45 @@ M2 验证结果（本机）：
 - `cargo test --manifest-path src-tauri/Cargo.toml`：918 passed / 0 failed / 10 ignored。
 - `pnpm build`：eslint / tsc / vitest / vite build 全部通过（含活动开关用例）。
 - 实机验收未做：地图扫描（M1）+ 进关（M2）需一次上机连验。
+
+---
+
+## 12. M3 落地记录（2026-11-03）
+
+已完成：
+
+- 结算循环：`BattleResultContinue` 活动分支先做与重复任务相同的每轮重置（复用
+  `complete_rank_up_quest_run` 并更名 `complete_quest_run`：轮数 +1、进度播报、
+  队伍/助战/战斗状态清零），未达 `max_mission_runs` 且未勾选「打完本轮停止」时点
+  「结束」→ 阶段 `AwaitingReturnToMap`；下一次 `EventMap` 观测置 `rescan_needed`
+  并继续循环。达上限或勾选停止则照旧点「结束」→ `Finished`。
+- 增量重扫接入：`EventScanner::scan_delta(previous)`（缩到最小 → `delta_targets`
+  取新出现/上轮锁定的标签 → `visit_labels` 只开这些卡 → `merge_delta` 合并），
+  结算回图后由 `event_scan_cards(rescan)` 使用，结果回写扫图缓存；无缓存或增量失败
+  回退全量扫描。
+- 九个活动画面接入 `handle_event_screen`（坐标取参考实现 `_common`，归一化后经
+  `tap_at` 走人类化抖动）：`Story` 跳过（1786,60）→ `SkipConfirm` 确认（1241,840）；
+  `TapContinue`（960,400）；`Tip` 退出（975,845）；`ListUpdate` 否（592,755）；
+  `RepeatConfirm` 关闭（700,875）；`ServantFull` 关闭（860,720）后停止；`Defeat`
+  不点击直接停止（绝不圣晶石复活）；`PartyConfirm` 不点击，连续观测超 40 帧停止。
+  普通战斗不受影响：这些画面全部是 `EVENT_ONLY` 检测，战斗识别范围不会产生它们。
+- 失败恢复：连续进关失败（卡片被点掉 / OCR 找不到标签超限）改为「标签黑名单 + 退避 +
+  换下一个关卡」，不再直接停止。黑名单 `bad_labels` 上限 2 次、仅内存；退避
+  5/10/20/40/60 秒封顶（`backoff_seconds`），`QuestConfirm` 点「开始任务」成功即清零
+  连击。全部关卡被拉黑时选卡报错停止。
+
+与计划的偏差：
+
+1. `PartyConfirm` 的「默认等待」加了上限（40 帧）：弹窗本身会一直挡路，无限等待只会
+   卡死整个 run，超限后停止等人工确认比永远等更符合「不自动编队」的安全意图。
+2. 黑名单/退避是 M4 `plan_once` 的组成件，提前在 M3 实现并接到 `pick_target_card`
+   （新增黑名单参数），M4 只需把选卡目标换成策略函数。
+3. 结算页按钮沿用 `BATTLE_RESULT_CONTINUE_STOP`（即参考实现的「结束任务」），goal 里
+   的「点关闭」指同一按钮。
+
+M3 验证结果（本机）：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml`：920 passed / 0 failed / 10 ignored
+  （新增：黑名单排除、退避序列、9 个对话框参考坐标、阶段初值断言）。
+- 前端与 sidecar 本阶段无改动，未重跑（M2 基线仍然有效）。
+- 实机验收未做：待 P4 连续 soak 验证「连续打 ≥3 本不中断、全灭只停」。

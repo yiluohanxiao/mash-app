@@ -13,7 +13,7 @@ mod scan;
 mod scout;
 
 pub(crate) use card::{best_farm_quest, QuestCard};
-pub(crate) use farm::EventFarmRuntime;
+pub(crate) use farm::{EventFarmPhase, EventFarmRuntime};
 pub(crate) use scan::{save_cache, EventScanner};
 
 #[cfg(test)]

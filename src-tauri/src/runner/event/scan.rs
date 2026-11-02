@@ -92,6 +92,27 @@ impl<'a> EventScanner<'a> {
         })
     }
 
+    /// Incremental re-scan after quest progress (reference `scout.scan`
+    /// delta mode): only labels that were not in `previous`, or whose card
+    /// was locked and may have unlocked since, are opened again. The merged
+    /// list keeps every previously known card.
+    pub(crate) fn scan_delta(&mut self, previous: &[QuestCard]) -> Result<Vec<QuestCard>, String> {
+        if self.detect()? != Screen::EventMap {
+            return Err("当前不在活动地图，无法增量扫描".into());
+        }
+        self.zoom_out()?;
+        let targets: Vec<MapLabel> = super::scout::delta_targets(previous, &self.labels()?)
+            .into_iter()
+            .cloned()
+            .collect();
+        if targets.is_empty() {
+            return Ok(previous.to_vec());
+        }
+        let mut added = Vec::new();
+        self.visit_labels(&targets, &mut added)?;
+        Ok(super::scout::merge_delta(previous.to_vec(), added, &targets))
+    }
+
     fn detect(&mut self) -> Result<Screen, String> {
         self.client
             .detect(None)

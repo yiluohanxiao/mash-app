@@ -530,7 +530,7 @@ impl Runner {
         self.battle_result_continue_handled = true;
 
         if self.rank_up_quest_active() {
-            self.complete_rank_up_quest_run();
+            self.complete_quest_run();
             self.emit("BattleResultContinue", "结束当前强化关卡，返回任务列表");
             if !self.tap_at("BattleResultContinue", BATTLE_RESULT_CONTINUE_STOP) {
                 return;
@@ -541,18 +541,42 @@ impl Runner {
         }
 
         if self.event_farm_active() {
-            // M2 enters one quest and stops; the map loop (M3) replaces this
-            // branch with "return to the event map and pick the next quest".
-            self.completed_mission_runs += 1;
-            self.emit_run_progress();
+            // Settled one event quest: reset the per-run battle/support
+            // state, leave the quest, and let the next `EventMap` frame
+            // pick the following quest (with a delta rescan, since story
+            // progress may have unlocked cards).
+            self.complete_quest_run();
+            let reached_run_cap = self
+                .config
+                .max_mission_runs
+                .is_some_and(|max| self.completed_mission_runs >= max);
+            if reached_run_cap || self.should_stop_after_current() {
+                self.emit(
+                    "BattleResultContinue",
+                    &format!("活动刷本结束（已完成 {} 轮）", self.completed_mission_runs),
+                );
+                if !self.tap_at("BattleResultContinue", BATTLE_RESULT_CONTINUE_STOP) {
+                    return;
+                }
+                self.transition_lifecycle(RunnerLifecycleEvent::Finished);
+                return;
+            }
             self.emit(
                 "BattleResultContinue",
-                &format!("活动刷本结束（已完成 {} 轮）", self.completed_mission_runs),
+                &format!(
+                    "返回活动地图，准备下一轮（已完成 {} 轮）",
+                    self.completed_mission_runs
+                ),
             );
             if !self.tap_at("BattleResultContinue", BATTLE_RESULT_CONTINUE_STOP) {
                 return;
             }
-            self.transition_lifecycle(RunnerLifecycleEvent::Finished);
+            if let Some(runtime) = self.event_farm_runtime.as_mut() {
+                runtime.phase = EventFarmPhase::AwaitingReturnToMap;
+                runtime.pending_card = None;
+                runtime.rescan_needed = true;
+            }
+            thread::sleep(ACTION_DELAY);
             return;
         }
 

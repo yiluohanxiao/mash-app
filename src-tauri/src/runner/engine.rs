@@ -198,35 +198,37 @@ impl Runner {
                     last_detected_screen = screen;
                     self.handle_ap_recovery()?;
                 }
-                // Event-farm mode routes the map/entry screens through the
-                // event runtime; ordinary runs never see them (battle
-                // detection scope excludes them).
-                Screen::EventMap | Screen::NodeDetail | Screen::QuestConfirm | Screen::Gate => {
+                // Event-farm mode routes the map/entry screens and the
+                // event-only dialogs through the event runtime; ordinary
+                // runs never see them (battle detection scope excludes
+                // them all).
+                Screen::EventMap
+                | Screen::NodeDetail
+                | Screen::QuestConfirm
+                | Screen::Gate
+                | Screen::Story
+                | Screen::SkipConfirm
+                | Screen::TapContinue
+                | Screen::Tip
+                | Screen::ListUpdate
+                | Screen::RepeatConfirm
+                | Screen::ServantFull
+                | Screen::Defeat
+                | Screen::PartyConfirm => {
                     unknown_count = 0;
                     last_detected_screen = screen;
                     self.handle_event_screen(screen)?;
                 }
-                // Event-farm screens are only produced when the sidecar runs
-                // the event detection scope. This runner has no routing for
-                // them yet, so they share the unknown-frame handling: wait,
-                // count toward the recognition timeout, never tap.
+                // Wait-only screens: keep animation skips running, count
+                // toward the recognition timeout, never tap.
                 Screen::Unknown
                 | Screen::Terminal
-                | Screen::Story
-                | Screen::SkipConfirm
-                | Screen::TapContinue
                 | Screen::Loading
                 | Screen::Title
-                | Screen::Defeat
                 | Screen::Busy
                 | Screen::Cg
                 | Screen::RewardSelect
-                | Screen::RewardPage
-                | Screen::ServantFull
-                | Screen::Tip
-                | Screen::PartyConfirm
-                | Screen::RepeatConfirm
-                | Screen::ListUpdate => {
+                | Screen::RewardPage => {
                     unknown_count += 1;
                     let timeout = self.config.unknown_screen_timeout_count;
                     if unknown_count >= timeout {

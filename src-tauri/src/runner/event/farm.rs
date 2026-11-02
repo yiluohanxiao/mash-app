@@ -1,15 +1,21 @@
-//! Event-farm runtime (M2): pick a quest on the event map and enter it.
+//! Event-farm runtime: loop quests on the event map and recover from the
+//! event-only dialogs in between.
 //!
 //! The main loop routes `EventMap` / `NodeDetail` / `QuestConfirm` / `Gate`
-//! here while the event-farm mode is active. From `SupportSelect` onward the
-//! ordinary battle handlers take over untouched; M3 adds the loop back to the
-//! map after settlement.
+//! plus the event-only dialog screens here while the event-farm mode is
+//! active. From `SupportSelect` onward the ordinary battle handlers take
+//! over untouched; the settlement page closes back to the map and the next
+//! `EventMap` frame picks the following quest (delta-rescanning, since
+//! story progress may have unlocked cards).
 //!
 //! Flow per poll:
-//! `NeedMap` — scan (or reuse the 3-hour cache), pick the target card, tap
-//! its region label → `AwaitingNodeDetail`; `NodeDetail` taps ▶ →
-//! `AwaitingBattle`; `QuestConfirm` taps 开始. `Gate` means the card was
-//! closed and we drifted into the free-quest list: close it and retry.
+//! `NeedMap` — scan (or reuse the 3-hour cache; delta-rescan after a
+//! settlement), pick the target card, tap its region label →
+//! `AwaitingNodeDetail`; `NodeDetail` taps ▶ → `AwaitingBattle`;
+//! `QuestConfirm` taps 开始 and clears the failure streak. `Gate` means the
+//! card was closed and we drifted into the free-quest list: close it and
+//! retry. Repeated entry failures blacklist the label (`BAD_LIMIT`) and
+//! back off (5/10/20/40/60s) before picking another card.
 
 use super::cache::{ScanCache, SCAN_CACHE_MAX_AGE};
 use super::card::QuestCard;
@@ -18,9 +24,10 @@ use super::scan::{save_cache, EventScanner};
 use crate::automation_error::AutomationResult;
 use crate::runner::{EventFarmConfig, Point, Runner, ACTION_DELAY};
 use crate::screen::Screen;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Quest-detail card ▶ (forward) button, reference `nav.NODE_FORWARD`.
 const NODE_FORWARD: (f64, f64) = (1370.0 / 1920.0, 320.0 / 1080.0);
@@ -28,9 +35,34 @@ const NODE_FORWARD: (f64, f64) = (1370.0 / 1920.0, 320.0 / 1080.0);
 const QUEST_START: (f64, f64) = (1259.0 / 1920.0, 846.0 / 1080.0);
 /// Quest-detail card 关闭 button, reference `nav.CARD_CLOSE`.
 const CARD_CLOSE: (f64, f64) = (163.0 / 1920.0, 63.0 / 1080.0);
+/// Story screens: 右上「跳过」, then the confirm dialog's 「是」
+/// (reference `nav.SKIP` / `nav.SKIP_YES`).
+const SKIP_BUTTON: (f64, f64) = (1786.0 / 1920.0, 60.0 / 1080.0);
+const SKIP_CONFIRM_YES: (f64, f64) = (1241.0 / 1920.0, 840.0 / 1080.0);
+/// Generic "tap to continue" point that avoids bottom toasts
+/// (reference `nav.TAP_ANYWHERE`).
+const TAP_ANYWHERE: (f64, f64) = (960.0 / 1920.0, 400.0 / 1080.0);
+/// Tip dialog 「退出」, center of the reference tap box
+/// `_common` tip: (700, 790, 1250, 900).
+const TIP_QUIT: (f64, f64) = (975.0 / 1920.0, 845.0 / 1080.0);
+/// List-update dialog 「否」, reference `_common` fixed fallback (592, 755).
+const LIST_UPDATE_NO: (f64, f64) = (592.0 / 1920.0, 755.0 / 1080.0);
+/// Repeat-quest dialog 「关闭」, center of the reference tap box
+/// `_common` repeat_confirm: (500, 820, 900, 930).
+const REPEAT_CONFIRM_CLOSE: (f64, f64) = (700.0 / 1920.0, 875.0 / 1080.0);
+/// Servant-full dialog 「关闭」 — never 变还 / 强化 / 灵基保管室
+/// (reference `nav.SERVANT_FULL_CLOSE`).
+const SERVANT_FULL_CLOSE: (f64, f64) = (860.0 / 1920.0, 720.0 / 1080.0);
 /// How often one label may be tapped (or fail to be found) before the run
-/// stops instead of silently burning AP on a half-understood map.
+/// gives up on that card instead of silently burning AP on a half-understood
+/// map.
 const MAX_CARD_ATTEMPTS: u32 = 3;
+/// A label that failed this many consecutive quests is skipped for the rest
+/// of the run (reference `flow.BAD_LIMIT`, in-memory only).
+pub(crate) const BAD_LIMIT: u32 = 2;
+/// `PartyConfirm` is never auto-confirmed; this many consecutive
+/// observations instead stop the run so the user can confirm the party.
+const PARTY_CONFIRM_MAX_OBSERVATIONS: u32 = 40;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EventFarmPhase {
@@ -40,6 +72,10 @@ pub(crate) enum EventFarmPhase {
     AwaitingNodeDetail,
     /// ▶ tapped, waiting for the quest-confirm dialog and battle setup.
     AwaitingBattle,
+    /// Settlement closed; waiting for the game to redraw the event map.
+    /// The next `EventMap` observation does a delta rescan because story
+    /// progress may have unlocked cards.
+    AwaitingReturnToMap,
 }
 
 pub(crate) struct EventFarmRuntime {
@@ -50,6 +86,17 @@ pub(crate) struct EventFarmRuntime {
     /// Taps on the current label, and failed label lookups. Reset when a
     /// new target is picked.
     pub(crate) label_attempts: u32,
+    /// Settlement just completed: the next target pick must delta-rescan
+    /// (points moved, story may have unlocked).
+    pub(crate) rescan_needed: bool,
+    /// Consecutive quest-entry failures, driving the retry backoff.
+    pub(crate) failures: u32,
+    /// Region labels whose quest repeatedly failed to open this run.
+    /// In-memory only, cleared when automation restarts.
+    pub(crate) bad_labels: HashMap<String, u32>,
+    /// Consecutive `PartyConfirm` observations; the dialog is never
+    /// auto-confirmed, so a stuck one stops the run.
+    pub(crate) party_confirm_seen: u32,
 }
 
 impl EventFarmRuntime {
@@ -59,21 +106,34 @@ impl EventFarmRuntime {
             phase: EventFarmPhase::NeedMap,
             pending_card: None,
             label_attempts: 0,
+            rescan_needed: false,
+            failures: 0,
+            bad_labels: HashMap::new(),
+            party_confirm_seen: 0,
         }
     }
 }
 
 /// Choose the quest to farm. An explicit target matches by name
 /// (reference `_match`: containment either way); otherwise the
-/// highest-level unlocked farm quest wins. Locked cards never match.
+/// highest-level unlocked farm quest wins. Locked cards never match, and
+/// labels with `BAD_LIMIT` consecutive failures are skipped.
 pub(crate) fn pick_target_card(
     cards: &[QuestCard],
     target: Option<&str>,
+    bad_labels: &HashMap<String, u32>,
 ) -> Result<QuestCard, String> {
+    let excluded = |label: &str| {
+        bad_labels
+            .get(label)
+            .is_some_and(|count| *count >= BAD_LIMIT)
+    };
     if let Some(target) = target.filter(|t| !t.trim().is_empty()) {
         let matches: Vec<&QuestCard> = cards
             .iter()
-            .filter(|card| !card.locked && map::hint_ok(&card.name, target))
+            .filter(|card| {
+                !card.locked && !excluded(&card.label) && map::hint_ok(&card.name, target)
+            })
             .collect();
         return matches
             .iter()
@@ -81,9 +141,24 @@ pub(crate) fn pick_target_card(
             .map(|card| (*card).clone())
             .ok_or_else(|| format!("扫描结果里没有名为「{target}」的可打关卡"));
     }
-    super::card::best_farm_quest(cards)
+    let candidates: Vec<QuestCard> = cards
+        .iter()
+        .filter(|card| !excluded(&card.label))
         .cloned()
-        .ok_or_else(|| "扫描结果里没有可打的活动关卡（全部锁定或 AP 不足）".into())
+        .collect();
+    super::card::best_farm_quest(&candidates)
+        .cloned()
+        .ok_or_else(|| "扫描结果里没有可打的活动关卡（全部锁定、拉黑或 AP 不足）".into())
+}
+
+/// Sleep before the next retry after `failures` consecutive quest-entry
+/// failures (reference `flow.backoff_seconds`).
+pub(crate) fn backoff_seconds(failures: u32) -> u64 {
+    match failures {
+        0 => 0,
+        1..=5 => (5u64 << (failures - 1)).min(60),
+        _ => 60,
+    }
 }
 
 fn fresh_scan_cache(path: &std::path::Path) -> Option<ScanCache> {
@@ -101,13 +176,139 @@ impl Runner {
     }
 
     pub(crate) fn handle_event_screen(&mut self, screen: Screen) -> AutomationResult<()> {
+        if !self.event_farm_active() {
+            // Battle runs never route here (every one of these screens is
+            // event-only detection), but stay passive if one ever arrives.
+            return Ok(());
+        }
         match screen {
             Screen::EventMap => self.handle_event_map(),
             Screen::NodeDetail => self.handle_node_detail(),
             Screen::QuestConfirm => self.handle_quest_confirm(),
             Screen::Gate => self.handle_event_gate(),
+            Screen::Story => self.handle_story_skip(),
+            Screen::SkipConfirm => self.handle_skip_confirm(),
+            Screen::TapContinue => self.handle_tap_continue(),
+            Screen::Tip => self.handle_tip_quit(),
+            Screen::ListUpdate => self.handle_list_update(),
+            Screen::RepeatConfirm => self.handle_repeat_confirm(),
+            Screen::ServantFull => self.handle_servant_full(),
+            Screen::Defeat => self.handle_defeat(),
+            Screen::PartyConfirm => self.handle_party_confirm(),
             _ => Ok(()),
         }
+    }
+
+    /// Never auto-confirm a party change; a dialog that will not go away
+    /// stops the run for a manual decision instead of tapping blind.
+    fn handle_party_confirm(&mut self) -> AutomationResult<()> {
+        let Some(seen) = self.event_farm_runtime.as_mut().map(|runtime| {
+            runtime.party_confirm_seen += 1;
+            runtime.party_confirm_seen
+        }) else {
+            return Ok(());
+        };
+        if seen > PARTY_CONFIRM_MAX_OBSERVATIONS {
+            self.fail_action(
+                "PartyConfirm",
+                "编队确认处理",
+                "编队确认弹窗长时间未消失：不自动确认编队，已停止，请人工确认队伍".into(),
+            );
+            return Ok(());
+        }
+        self.emit_debug(
+            "PartyConfirm",
+            "编队确认弹窗，等待人工确认；不自动点击，避免意外编队",
+        );
+        Ok(())
+    }
+
+    /// A story scene opened mid-run (main-quest unlocks do this). Skip it:
+    /// 右上「跳过」, then the confirm dialog's 「是」.
+    fn handle_story_skip(&mut self) -> AutomationResult<()> {
+        self.emit("Story", "点击「跳过」跳过活动剧情");
+        if self.tap_at("Story", Point::new(SKIP_BUTTON.0, SKIP_BUTTON.1)) {
+            thread::sleep(ACTION_DELAY);
+        }
+        Ok(())
+    }
+
+    fn handle_skip_confirm(&mut self) -> AutomationResult<()> {
+        self.emit("SkipConfirm", "确认跳过剧情");
+        if self.tap_at("SkipConfirm", Point::new(SKIP_CONFIRM_YES.0, SKIP_CONFIRM_YES.1)) {
+            thread::sleep(ACTION_DELAY);
+        }
+        Ok(())
+    }
+
+    /// Post-scene "tap to continue" overlay.
+    fn handle_tap_continue(&mut self) -> AutomationResult<()> {
+        self.emit("TapContinue", "点击继续");
+        if self.tap_at("TapContinue", Point::new(TAP_ANYWHERE.0, TAP_ANYWHERE.1)) {
+            thread::sleep(ACTION_DELAY);
+        }
+        Ok(())
+    }
+
+    /// Tip dialog (e.g. 圣晶石不足 notices). Only 退出 is safe: the other
+    /// buttons lead to purchase/recharge surfaces.
+    fn handle_tip_quit(&mut self) -> AutomationResult<()> {
+        self.emit("Tip", "提示弹窗，点击「退出」");
+        if self.tap_at("Tip", Point::new(TIP_QUIT.0, TIP_QUIT.1)) {
+            thread::sleep(ACTION_DELAY);
+        }
+        Ok(())
+    }
+
+    /// Support-list update prompt. Refreshing costs nothing but stalls the
+    /// loop, so answer 否.
+    fn handle_list_update(&mut self) -> AutomationResult<()> {
+        self.emit("ListUpdate", "列表更新弹窗，点击「否」");
+        if self.tap_at("ListUpdate", Point::new(LIST_UPDATE_NO.0, LIST_UPDATE_NO.1)) {
+            thread::sleep(ACTION_DELAY);
+        }
+        Ok(())
+    }
+
+    /// Repeat-quest prompt. 关闭, never 再来一次: the strategy picks the
+    /// next quest itself (points may have unlocked story).
+    fn handle_repeat_confirm(&mut self) -> AutomationResult<()> {
+        self.emit("RepeatConfirm", "连战确认弹窗，点击「关闭」");
+        if self.tap_at(
+            "RepeatConfirm",
+            Point::new(REPEAT_CONFIRM_CLOSE.0, REPEAT_CONFIRM_CLOSE.1),
+        ) {
+            if let Some(runtime) = self.event_farm_runtime.as_mut() {
+                runtime.phase = EventFarmPhase::NeedMap;
+            }
+            thread::sleep(ACTION_DELAY);
+        }
+        Ok(())
+    }
+
+    /// Servant inventory full: close the dialog, then stop. Never 变还 or
+    /// 灵基保管室 — deleting servants is the user's call.
+    fn handle_servant_full(&mut self) -> AutomationResult<()> {
+        self.emit_warn("ServantFull", "从者栏已满：关闭弹窗后停止，请手动清理从者");
+        if self.tap_at("ServantFull", Point::new(SERVANT_FULL_CLOSE.0, SERVANT_FULL_CLOSE.1)) {
+            thread::sleep(ACTION_DELAY);
+        }
+        self.fail_action(
+            "ServantFull",
+            "从者栏满处理",
+            "从者栏已满，已停止；请手动清理从者后重新启动".into(),
+        );
+        Ok(())
+    }
+
+    /// Defeat: stop without reviving. 圣晶石复活 is never an option.
+    fn handle_defeat(&mut self) -> AutomationResult<()> {
+        self.fail_action(
+            "Defeat",
+            "战斗失败处理",
+            "战斗败北：不自动复活，已停止等待人工处理".into(),
+        );
+        Ok(())
     }
 
     fn handle_event_map(&mut self) -> AutomationResult<()> {
@@ -116,9 +317,18 @@ impl Runner {
             .as_ref()
             .map(|runtime| runtime.phase)
             .unwrap_or(EventFarmPhase::NeedMap);
-        if phase != EventFarmPhase::NeedMap {
+        if phase == EventFarmPhase::AwaitingReturnToMap {
+            // Back from settlement; the next target pick delta-rescans
+            // because story progress may have unlocked cards.
+            if let Some(runtime) = self.event_farm_runtime.as_mut() {
+                runtime.phase = EventFarmPhase::NeedMap;
+                runtime.rescan_needed = true;
+                runtime.pending_card = None;
+            }
+        } else if phase != EventFarmPhase::NeedMap {
             // The card was closed without entering (▶ missed, dialog
-            // dismissed). Retry the same label a bounded number of times.
+            // dismissed). Retry the same label a bounded number of times,
+            // then blacklist it and pick a different card after a backoff.
             let attempts = self
                 .event_farm_runtime
                 .as_mut()
@@ -129,11 +339,8 @@ impl Runner {
                 })
                 .unwrap_or(0);
             if attempts > MAX_CARD_ATTEMPTS {
-                self.fail_action(
-                    "EventMap",
-                    "点开任务卡",
-                    "连续多次没能从地图进入任务卡".into(),
-                );
+                self.blacklist_pending_label("EventMap", "连续多次没能从地图进入任务卡");
+                self.apply_backoff("EventMap");
                 return Ok(());
             }
             self.emit(
@@ -202,11 +409,8 @@ impl Runner {
                     })
                     .unwrap_or(0);
                 if attempts > MAX_CARD_ATTEMPTS {
-                    self.fail_action(
-                        "EventMap",
-                        "定位区域标签",
-                        format!("地图上找不到标签「{label}」"),
-                    );
+                    self.blacklist_pending_label("EventMap", &format!("地图上找不到标签「{label}」"));
+                    self.apply_backoff("EventMap");
                     return Ok(());
                 }
                 self.emit_warn(
@@ -242,6 +446,11 @@ impl Runner {
     fn handle_quest_confirm(&mut self) -> AutomationResult<()> {
         self.emit("QuestConfirm", "点击「开始任务」");
         if self.tap_at("QuestConfirm", Point::new(QUEST_START.0, QUEST_START.1)) {
+            // A confirmed quest start ends the failure streak: backoff only
+            // measures consecutive *entry* failures.
+            if let Some(runtime) = self.event_farm_runtime.as_mut() {
+                runtime.failures = 0;
+            }
             thread::sleep(ACTION_DELAY);
         }
         Ok(())
@@ -270,32 +479,113 @@ impl Runner {
         Ok(())
     }
 
-    /// Cards from the 3-hour scan cache, or a live scan (saved back).
-    fn event_scan_cards(&mut self) -> Result<Vec<QuestCard>, String> {
-        let path = self.scan_cache_path();
-        if let Some(cache) = path.as_deref().and_then(fresh_scan_cache) {
-            self.emit_debug("EventMap", "使用 3 小时内的扫图缓存");
-            return Ok(cache.cards);
+    /// Record a failed entry attempt for the pending card's label, drop the
+    /// card, and let the next poll pick a different one. A label failing
+    /// `BAD_LIMIT` times is excluded by `pick_target_card` for the rest of
+    /// the run (in-memory only).
+    fn blacklist_pending_label(&mut self, screen: &str, reason: &str) {
+        let outcome = self.event_farm_runtime.as_mut().and_then(|runtime| {
+            runtime.pending_card.take().map(|card| {
+                let count = runtime.bad_labels.entry(card.label.clone()).or_insert(0);
+                *count += 1;
+                (card.label, *count)
+            })
+        });
+        self.emit_warn(screen, &format!("{reason}，换一个关卡重试"));
+        if let Some((label, count)) = outcome {
+            if count >= BAD_LIMIT {
+                self.emit_warn(screen, &format!("标签「{label}」已拉黑，本轮跳过"));
+            } else {
+                self.emit_warn(
+                    screen,
+                    &format!("标签「{label}」失败计数 {count}/{BAD_LIMIT}"),
+                );
+            }
         }
+    }
+
+    /// Pause after a consecutive quest-entry failure (5/10/20/40/60s cap).
+    fn apply_backoff(&mut self, screen: &str) {
+        let seconds = self
+            .event_farm_runtime
+            .as_mut()
+            .map(|runtime| {
+                runtime.failures += 1;
+                runtime.label_attempts = 0;
+                backoff_seconds(runtime.failures)
+            })
+            .unwrap_or(0);
+        self.emit_warn(screen, &format!("连续失败，等待 {seconds} 秒后重试"));
+        thread::sleep(Duration::from_secs(seconds));
+    }
+
+    /// Cards from the 3-hour scan cache, or a live scan (saved back). After
+    /// a settlement, `rescan` limits the live scan to newly visible /
+    /// newly unlocked labels and merges with the cached list.
+    fn event_scan_cards(&mut self, rescan: bool) -> Result<Vec<QuestCard>, String> {
+        let path = self.scan_cache_path();
+        let cached = path.as_deref().and_then(fresh_scan_cache);
+        if !rescan {
+            if let Some(cache) = cached {
+                self.emit_debug("EventMap", "使用 3 小时内的扫图缓存");
+                return Ok(cache.cards);
+            }
+            return self.full_event_scan();
+        }
+        let Some(previous) = cached.map(|cache| cache.cards) else {
+            self.emit_warn("EventMap", "没有可用的扫图缓存，回退全量扫描");
+            return self.full_event_scan();
+        };
+        self.emit("EventMap", "增量重扫活动地图（检查新解锁关卡）…");
+        let client = self.sidecar.as_mut().expect("runner sidecar missing");
+        let touch = &mut *self.touch;
+        let mut scanner = EventScanner::new(client, touch, (self.screen_w, self.screen_h));
+        match scanner.scan_delta(&previous) {
+            Ok(cards) => {
+                if let Some(path) = &path {
+                    save_cache(path, cards.clone())
+                        .map_err(|error| format!("写入扫图缓存失败: {error}"))?;
+                }
+                Ok(cards)
+            }
+            Err(error) => {
+                self.emit_warn("EventMap", &format!("增量重扫失败，回退全量扫描: {error}"));
+                self.full_event_scan()
+            }
+        }
+    }
+
+    fn full_event_scan(&mut self) -> Result<Vec<QuestCard>, String> {
         self.emit("EventMap", "扫描活动地图（约 1–3 分钟）…");
         let client = self.sidecar.as_mut().expect("runner sidecar missing");
         let touch = &mut *self.touch;
         let mut scanner = EventScanner::new(client, touch, (self.screen_w, self.screen_h));
         let outcome = scanner.scan()?;
-        if let Some(path) = &path {
-            save_cache(path, outcome.cards.clone())
+        if let Some(path) = self.scan_cache_path() {
+            save_cache(&path, outcome.cards.clone())
                 .map_err(|error| format!("写入扫图缓存失败: {error}"))?;
         }
         Ok(outcome.cards)
     }
 
     fn select_event_target(&mut self) -> Result<QuestCard, String> {
-        let target = self
+        let (target, rescan, bad_labels) = self
             .event_farm_runtime
             .as_ref()
-            .and_then(|runtime| runtime.config.target_quest.clone());
-        let cards = self.event_scan_cards()?;
-        pick_target_card(&cards, target.as_deref())
+            .map(|runtime| {
+                (
+                    runtime.config.target_quest.clone(),
+                    runtime.rescan_needed,
+                    runtime.bad_labels.clone(),
+                )
+            })
+            .unwrap_or((None, false, HashMap::new()));
+        let cards = self.event_scan_cards(rescan)?;
+        let card = pick_target_card(&cards, target.as_deref(), &bad_labels)?;
+        if let Some(runtime) = self.event_farm_runtime.as_mut() {
+            runtime.rescan_needed = false;
+        }
+        Ok(card)
     }
 
     fn find_event_label_point(&mut self, text: &str) -> Result<Option<(u32, u32)>, String> {
@@ -347,14 +637,14 @@ mod tests {
             card("残骸小镇", 90, 2, 40, false, "小镇"),
             card("技能升级本", 90, 0, 40, false, "小镇"),
         ];
-        let picked = pick_target_card(&cards, Some("残骸小镇")).unwrap();
+        let picked = pick_target_card(&cards, Some("残骸小镇"), &HashMap::new()).unwrap();
         assert_eq!(picked.plus, 2);
     }
 
     #[test]
     fn explicit_target_never_picks_a_locked_card() {
         let cards = [card("残骸小镇", 90, 2, 40, true, "小镇")];
-        assert!(pick_target_card(&cards, Some("残骸小镇")).is_err());
+        assert!(pick_target_card(&cards, Some("残骸小镇"), &HashMap::new()).is_err());
     }
 
     #[test]
@@ -364,7 +654,7 @@ mod tests {
             card("刷点本", 90, 1, 40, false, "b"),
             card("高难度", 90, 2, 40, false, "c"),
         ];
-        let picked = pick_target_card(&cards, Some("  ")).unwrap();
+        let picked = pick_target_card(&cards, Some("  "), &HashMap::new()).unwrap();
         assert_eq!(picked.name, "刷点本");
         assert_eq!(picked.plus, 1);
     }
@@ -372,21 +662,53 @@ mod tests {
     #[test]
     fn no_farmable_card_is_an_error_not_a_story_quest() {
         let cards = [card("序幕", 10, 0, 0, false, "a")];
-        let error = pick_target_card(&cards, None).unwrap_err();
+        let error = pick_target_card(&cards, None, &HashMap::new()).unwrap_err();
         assert!(error.contains("没有可打的活动关卡"));
     }
 
     #[test]
-    fn enter_points_match_the_reference_1920x1080_coordinates() {
+    fn blacklisted_labels_are_excluded_until_the_limit() {
+        let cards = [
+            card("刷点本", 90, 1, 40, false, "小镇"),
+            card("备用本", 80, 1, 40, false, "港口"),
+        ];
+        let mut bad = HashMap::new();
+        bad.insert("小镇".to_string(), BAD_LIMIT - 1);
+        let picked = pick_target_card(&cards, None, &bad).unwrap();
+        assert_eq!(picked.label, "小镇");
+
+        bad.insert("小镇".to_string(), BAD_LIMIT);
+        let picked = pick_target_card(&cards, None, &bad).unwrap();
+        assert_eq!(picked.label, "港口");
+
+        // A named target also skips its blacklisted label.
+        assert!(pick_target_card(&cards, Some("刷点本"), &bad).is_err());
+    }
+
+    #[test]
+    fn backoff_doubles_up_to_the_cap() {
+        let expected = [0, 5, 10, 20, 40, 60, 60];
+        for (failures, seconds) in expected.iter().enumerate() {
+            assert_eq!(backoff_seconds(failures as u32), *seconds);
+        }
+        assert_eq!(backoff_seconds(50), 60);
+    }
+
+    #[test]
+    fn dialog_points_match_the_reference_1920x1080_coordinates() {
         let to_px = |p: (f64, f64)| {
             (
                 (p.0 * 1920.0).round() as u32,
                 (p.1 * 1080.0).round() as u32,
             )
         };
-        assert_eq!(to_px(NODE_FORWARD), (1370, 320));
-        assert_eq!(to_px(QUEST_START), (1259, 846));
-        assert_eq!(to_px(CARD_CLOSE), (163, 63));
+        assert_eq!(to_px(SKIP_BUTTON), (1786, 60));
+        assert_eq!(to_px(SKIP_CONFIRM_YES), (1241, 840));
+        assert_eq!(to_px(TAP_ANYWHERE), (960, 400));
+        assert_eq!(to_px(TIP_QUIT), (975, 845));
+        assert_eq!(to_px(LIST_UPDATE_NO), (592, 755));
+        assert_eq!(to_px(REPEAT_CONFIRM_CLOSE), (700, 875));
+        assert_eq!(to_px(SERVANT_FULL_CLOSE), (860, 720));
     }
 
     #[test]
@@ -395,5 +717,8 @@ mod tests {
         assert_eq!(runtime.phase, EventFarmPhase::NeedMap);
         assert!(runtime.pending_card.is_none());
         assert_eq!(runtime.label_attempts, 0);
+        assert!(!runtime.rescan_needed);
+        assert_eq!(runtime.failures, 0);
+        assert!(runtime.bad_labels.is_empty());
     }
 }

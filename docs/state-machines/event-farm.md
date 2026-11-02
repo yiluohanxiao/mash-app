@@ -7,7 +7,7 @@
 生命周期、模板错误和失败诊断见[公共约定](README.md)。参考实现来自 `reference/fgo-auto/`
 （只读导出，已被 git 忽略），逐函数映射见 [event-farm-plan.md](../event-farm-plan.md)。
 
-## 当前范围（M2）
+## 当前范围（M3）
 
 已完成：
 
@@ -28,10 +28,15 @@
 - 调试命令 `debug_scan_event_map` 与前端「扫描活动地图」按钮，实机验收靠它。
 - M2 进关：`EventFarmRuntime` 驱动 `EventMap → NodeDetail → QuestConfirm`，`Gate` 退出，
   从 `SupportSelect` 起交给战斗引擎；入口是战斗页「活动刷本」开关。
+- M3 循环与恢复：结算页点「结束」回活动地图，回图后增量重扫再选下一本；
+  `Story`/`SkipConfirm`/`TapContinue`/`Tip`/`ListUpdate`/`RepeatConfirm`/`ServantFull`/
+  `Defeat`/`PartyConfirm` 九个活动画面接入事件处理器（坐标取参考实现 `_common`）；
+  连续进关失败退避 5/10/20/40/60 秒，同一标签连败 2 次本轮内拉黑（仅内存，不落盘）。
+  `max_mission_runs` 与「打完本轮停止」照常生效，达到上限仍停止。
 
-未完成（后续里程碑）：结算后回地图的循环与恢复（M3）、点数策略与苹果（M4）、每日任务（M5）、
-正式活动页面（现用战斗页开关）。除进关四画面外，其余活动画面（`Terminal`、`Story`、
-`Tip`、`PartyConfirm` 等）在活动模式下仍走 `Unknown` 分支：只等待、累计识别超时、不点击。
+未完成（后续里程碑）：点数策略与苹果（M4）、每日任务（M5）、正式活动页面（现用战斗页
+开关）。`Loading`、`Title`、`Busy`、`Cg`、`RewardSelect`、`RewardPage` 在活动模式下仍只
+等待不点击。
 
 ## 识别顺序
 
@@ -110,25 +115,37 @@ M1 只做「缩到最小后一屏放下」这一种扫法。
 和上次锁定的标签（`delta_targets`），合并时同名卡片以新结果为准；同一标签既读到锁定卡
 又读到解锁卡时保留解锁卡（`merge_delta`）。
 
-## 进关流程（M2）
+## 进关流程（M3）
 
 活动模式由现有 `Runner` 内的 `EventFarmRuntime` 驱动（决策 A：不建第二个 runner 进程，
 沿用 rank-up quest 的挂载方式）。启动命令 `start_event_farm_automation` 复用战斗启动链
 （设备租约记为 `AutomationKind::EventFarm`），识别范围切到 `use_event_detection()`；
-主循环把四个画面路由进 `runner/event/farm.rs`：
+主循环把 13 个活动画面路由进 `runner/event/farm.rs`：
 
 | 画面 | 动作 | 之后 |
 | --- | --- | --- |
-| `EventMap` | 取扫图缓存（3 小时内）或现场扫描；`pick_target_card` 选卡（指定名按名匹配，否则 `best_farm_quest`）；OCR 现找标签坐标并点击 | → `NodeDetail` |
+| `EventMap` | 取扫图缓存（3 小时内）或现场扫描（结算回来先增量重扫）；`pick_target_card` 选卡（指定名按名匹配，否则 `best_farm_quest`，黑名单标签排除）；OCR 现找标签坐标并点击 | → `NodeDetail` |
 | `NodeDetail` | 点 ▶（参考坐标 1370,320） | → `QuestConfirm` / 助战链 |
-| `QuestConfirm` | 点「开始任务」（参考坐标 1259,846） | 助战/队伍/战斗由现有处理器接管 |
+| `QuestConfirm` | 点「开始任务」（参考坐标 1259,846）；成功即清零失败连击 | 助战/队伍/战斗由现有处理器接管 |
 | `Gate` | 进关途中误入自由本列表：只点左上「关闭」 | 回 `EventMap` 重试 |
+| `Story` / `SkipConfirm` | 右上「跳过」（1786,60）→ 确认「是」（1241,840） | 主线解锁剧情被跳过 |
+| `TapContinue` | 点「请点击游戏界面」避开 toast 的位置（960,400） | 继续流程 |
+| `Tip` | 只点「退出」（975,845），绝不点确定/充值 | 弹窗消失 |
+| `ListUpdate` | 点「否」（592,755），不刷新助战列表 | 弹窗消失 |
+| `RepeatConfirm` | 点「关闭」（700,875），不点「连续出击」 | 由选卡策略决定下一个本 |
+| `ServantFull` | 点「关闭」（860,720），不变还/不删除从者 | 停止，等人工清理 |
+| `Defeat` | 不点击，绝不圣晶石复活 | 停止，等人工 |
+| `PartyConfirm` | 不点击，避免意外编队；连续观测超 40 帧仍未消失则停止 | 停止，等人工确认编队 |
 
 同一标签最多点 3 次：地图上重新观测到 `EventMap`（卡片被点掉）或 OCR 连续找不到标签
-都会计入，超限直接报错停止，不会盲点。地图上找不到标签时等待重试，不猜坐标。
+都会计入。超限把该标签计入黑名单、按连续失败次数退避（5/10/20/40/60 秒封顶）后换下一个
+关卡，而不是停止整个任务；地图上找不到标签时先等待重试，不猜坐标。黑名单仅存于内存
+（`bad_labels`，上限 2 次），自动化重启即清空。
 
-结算页 `BattleResultContinue` 在活动模式下点「结束」并 `Finished`（M2 只进一个本）；
-M3 把这里换成「回地图选下一个本」。
+结算页 `BattleResultContinue` 在活动模式下先做与重复任务相同的每轮重置（轮数 +1、
+队伍/战斗状态清零），未达 `max_mission_runs` 且未勾选「打完本轮停止」时点「结束」→
+`AwaitingReturnToMap`，下一次 `EventMap` 观测触发增量重扫并继续循环；达到上限或勾选
+停止则照旧 `Finished`。
 
 从 `SupportSelect` / `TeamConfirm` / `Battle` / 结算 onward 全部走现有战斗处理器，
 队伍、助战、技能配置沿用所选编队项目。
@@ -193,7 +210,8 @@ M3 把这里换成「回地图选下一个本」。
 - `cargo test --manifest-path src-tauri/Cargo.toml`：`Screen` 往返、检测范围、`cn/cv.json`
   活动探针的优先级顺序与 `overrides` 目标合法性；`runner/event/tests.rs` 覆盖卡片解析、
   平移几何、帧差边界、标签去重、缓存 TTL、增量合并；`runner/event/farm.rs` 覆盖选卡
-  （指定名 / 回退最高等级 / 锁定排除）、进关坐标、阶段初值；`touch/scrcpy.rs` 覆盖捏合事件序列。
+  （指定名 / 回退最高等级 / 锁定排除 / 黑名单标签排除）、退避序列、对话框参考坐标、
+  阶段初值；`touch/scrcpy.rs` 覆盖捏合事件序列。
 - `src/features/battle/__tests__/BattlePage.test.tsx`：「活动刷本」开关把启动命令切到
   `start_event_farm_automation` 并携带 `eventFarm`。
 - `src/features/debug/__tests__/DebugPage.test.tsx`：扫描按钮把标签/点数/卡片写入日志。
