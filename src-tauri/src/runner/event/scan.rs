@@ -30,6 +30,10 @@ const MIN_SCREEN_LABELS: usize = 3;
 const TARGET_LABELS: usize = 7;
 const MAX_ZOOM_ROUNDS: u32 = 4;
 const MAX_PAN_STEPS: u32 = 12;
+/// Whole-map label search: panning steps before giving up. The reference
+/// event map is three rows tall at minimum zoom; 48 steps covers it with
+/// a wide margin.
+const MAX_FIND_STEPS: usize = 48;
 const CARD_RETRIES: u32 = 3;
 const THUMBNAIL: (u32, u32) = (64, 36);
 /// Card "close" button in the top-left, and the empty-space fallback for
@@ -111,6 +115,42 @@ impl<'a, S: EventCvSource> EventScanner<'a, S> {
         let mut added = Vec::new();
         self.visit_labels(&targets, &mut added)?;
         Ok(super::scout::merge_delta(previous.to_vec(), added, &targets))
+    }
+
+    /// Search the whole map for one region label: zoom out (the game does
+    /// not remember zoom between map visits), rewind to the top-left
+    /// corner, then sweep row by row — right to the edge, one row down,
+    /// left to the edge, … — until the label shows up. Returns the label
+    /// as read in the frame where it was found, so its point is tappable
+    /// right away.
+    pub(crate) fn find_label(&mut self, text: &str) -> Result<Option<MapLabel>, String> {
+        self.zoom_out()?;
+        self.rewind()?;
+        let mut reveal_x = -1; // drag left: reveal the right columns first
+        let mut sweep_steps = 0usize;
+        loop {
+            if self.detect()? != Screen::EventMap {
+                return Err("拖图搜索时离开了活动地图".into());
+            }
+            if let Some(found) = self.refresh_label(text)? {
+                return Ok(Some(found));
+            }
+            if sweep_steps >= MAX_FIND_STEPS {
+                return Ok(None);
+            }
+            sweep_steps += 1;
+            let before = self.thumbnail()?;
+            MapNavigator::new(&mut *self.touch, self.screen).pan(reveal_x, Axis::X)?;
+            sleep(PAN_SETTLE);
+            let after = self.thumbnail()?;
+            let moved = map::mean_abs_diff(&before, &after);
+            if moved.map_or(true, map::is_boundary) {
+                // X edge reached: one row down, then sweep back.
+                MapNavigator::new(&mut *self.touch, self.screen).pan(-1, Axis::Y)?;
+                sleep(PAN_SETTLE);
+                reveal_x = -reveal_x;
+            }
+        }
     }
 
     fn detect(&mut self) -> Result<Screen, String> {

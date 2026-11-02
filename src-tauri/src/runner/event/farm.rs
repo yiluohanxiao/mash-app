@@ -655,6 +655,22 @@ impl Runner {
     }
 
     fn find_event_label_point(&mut self, text: &str) -> Result<Option<(u32, u32)>, String> {
+        if let Some(point) = self.label_point_in_frame(text)? {
+            return Ok(Some(point));
+        }
+        // The label is not in the current view: the game resets map zoom
+        // and pan on every return to the map, so the scanned position can
+        // be off-screen. Sweep the whole map for the label the way the
+        // scanner does, then tap where it was found.
+        self.emit_debug("EventMap", &format!("当前视野没有标签「{text}」，拖图搜索…"));
+        let client = self.sidecar.as_mut().expect("runner sidecar missing");
+        let touch = &mut *self.touch;
+        let mut scanner = EventScanner::new(client, touch, (self.screen_w, self.screen_h));
+        let found = scanner.find_label(text)?;
+        Ok(found.map(|label| map::label_point(&label, (self.screen_w, self.screen_h))))
+    }
+
+    fn label_point_in_frame(&mut self, text: &str) -> Result<Option<(u32, u32)>, String> {
         let result = self
             .sidecar()
             .read_map_labels(None)
