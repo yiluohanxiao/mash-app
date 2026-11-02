@@ -11,26 +11,32 @@
 //!   cards/points/labels as JSON (M1 acceptance).
 //! * `enter` — pick the best quest, tap its label, ▶, 开始任务, and wait for
 //!   the support-select handoff point (M2 acceptance; battle not driven here).
-//! * `loop`  — full farm loop incl. battle: pending (M4 soak), rejected for now.
+//! * `loop`  — full M3/M4 soak: build a real (windowless) Tauri app so the
+//!   production `SidecarClient` + `Runner` run the whole farm loop — scan,
+//!   enter, battle, settlement, apples — until `--max-quests`.
 //!
 //! Run from the repo root:
 //! `cargo run --bin event_harness -- --phase scan [--serial 127.0.0.1:16384]`
 
 use crate::adb::Adb;
+use crate::commands::settings::TouchControlSettingsState;
 use crate::runner::{
     hint_ok, label_point, pick_target_card, plan_once, usable_labels, EventPlan, EventScanner,
-    NODE_FORWARD, QuestCard, QUEST_START_POINT,
+    RunConfig, Runner, RunnerState, TeamVerificationControl, NODE_FORWARD, QuestCard,
+    QUEST_START_POINT,
 };
 use crate::screen::{
     BATTLE_DETECTION_SCREENS, CvError, EVENT_ONLY_DETECTION_SCREENS, EventCvSource,
     EventPointsResult, FrameThumbnail, MapLabelsResult, Point, QuestCardResult, Screen,
 };
+use crate::server::{STREAM_BIT_RATE, STREAM_MAX_FPS, STREAM_MAX_SIZE};
 use crate::Server;
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -42,11 +48,14 @@ const MAP_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const HANDOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(45);
 /// MuMu 12's default ADB port, then the older MuMu port.
 const MUMU_PORTS: [&str; 2] = ["16384", "7555"];
+/// Default quest cap for the soak loop.
+const DEFAULT_MAX_QUESTS: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HarnessPhase {
     Scan,
     Enter,
+    Loop,
 }
 
 pub struct HarnessOptions {
@@ -54,15 +63,17 @@ pub struct HarnessOptions {
     pub phase: HarnessPhase,
     pub target_quest: Option<String>,
     pub out_dir: PathBuf,
+    pub max_quests: u32,
 }
 
-/// Parse `--serial <s>`, `--phase <scan|enter>`, `--target <name>`,
-/// `--out-dir <dir>`. Returns Err with usage on bad input.
+/// Parse `--serial <s>`, `--phase <scan|enter|loop>`, `--target <name>`,
+/// `--max-quests <n>`, `--out-dir <dir>`. Returns Err with usage on bad input.
 pub fn parse_args(args: &[String]) -> Result<HarnessOptions, String> {
     let mut serial = None;
     let mut phase = None;
     let mut target_quest = None;
     let mut out_dir = None;
+    let mut max_quests = DEFAULT_MAX_QUESTS;
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -75,10 +86,21 @@ pub fn parse_args(args: &[String]) -> Result<HarnessOptions, String> {
                 phase = Some(match value.as_str() {
                     "scan" => HarnessPhase::Scan,
                     "enter" => HarnessPhase::Enter,
-                    other => return Err(format!("未知阶段 {other}（支持 scan / enter）")),
+                    "loop" => HarnessPhase::Loop,
+                    other => {
+                        return Err(format!("未知阶段 {other}（支持 scan / enter / loop）"));
+                    }
                 });
             }
             "--target" => target_quest = Some(value.clone()),
+            "--max-quests" => {
+                max_quests = value
+                    .parse()
+                    .map_err(|_| format!("--max-quests 需要正整数，收到 {value}"))?;
+                if max_quests == 0 {
+                    return Err("--max-quests 至少为 1".into());
+                }
+            }
             "--out-dir" => out_dir = Some(PathBuf::from(value)),
             other => return Err(format!("未知参数 {other}")),
         }
@@ -86,7 +108,7 @@ pub fn parse_args(args: &[String]) -> Result<HarnessOptions, String> {
     }
     Ok(HarnessOptions {
         serial,
-        phase: phase.ok_or("缺少 --phase（scan / enter）")?,
+        phase: phase.ok_or("缺少 --phase（scan / enter / loop）")?,
         target_quest,
         out_dir: out_dir.unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -94,6 +116,7 @@ pub fn parse_args(args: &[String]) -> Result<HarnessOptions, String> {
                 .map(|root| root.join(".screenshots"))
                 .unwrap_or_else(|| PathBuf::from(".screenshots"))
         }),
+        max_quests,
     })
 }
 
@@ -486,11 +509,15 @@ impl EventCvSource for HarnessSidecar {
 
 /// `adb connect` the MuMu ports in turn, then pick a ready device.
 fn connect_device(paths: &HarnessPaths, serial: Option<&str>) -> Result<Adb, String> {
-    let adb = Adb::with_path(paths.adb_exe.clone(), serial.map(str::to_string));
+    connect_device_exe(&paths.adb_exe, serial)
+}
+
+fn connect_device_exe(adb_exe: &Path, serial: Option<&str>) -> Result<Adb, String> {
+    let adb = Adb::with_path(adb_exe.to_path_buf(), serial.map(str::to_string));
     if serial.is_none() {
         for port in MUMU_PORTS {
             let target = format!("127.0.0.1:{port}");
-            let output = Command::new(&paths.adb_exe)
+            let output = Command::new(adb_exe)
                 .args(["connect", &target])
                 .output()
                 .map_err(|e| format!("adb connect 执行失败: {e}"))?;
@@ -658,7 +685,9 @@ pub fn run_from_env() -> i32 {
     let options = match parse_args(&args) {
         Ok(options) => options,
         Err(error) => {
-            eprintln!("{error}\n用法: event_harness --phase <scan|enter> [--serial <s>] [--target <关卡名>] [--out-dir <dir>]");
+            eprintln!(
+                "{error}\n用法: event_harness --phase <scan|enter|loop> [--serial <s>] [--target <关卡名>] [--max-quests <n>] [--out-dir <dir>]"
+            );
             return 2;
         }
     };
@@ -677,6 +706,15 @@ fn run(options: HarnessOptions) -> Result<(), String> {
         // only a reminder that the harness is exercised on Windows + MuMu.
         eprintln!("[harness] 提示: harness 只在 Windows + MuMu 上验证过");
     }
+    if options.phase == HarnessPhase::Loop {
+        let report = run_loop(&options)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| format!("序列化报告失败: {e}"))?
+        );
+        return Ok(());
+    }
+
     let server = Server::Cn;
     let paths = resolve_paths(server)?;
     let adb = connect_device(&paths, options.serial.as_deref())?;
@@ -702,8 +740,166 @@ fn run(options: HarnessOptions) -> Result<(), String> {
                 options.target_quest.as_deref(),
             )?;
         }
+        HarnessPhase::Loop => unreachable!("loop phase handled above"),
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Loop phase: full farm soak through the production Runner
+// ---------------------------------------------------------------------------
+
+/// Build a real but windowless Tauri app so the production `SidecarClient`
+/// (shell-plugin spawn) and `Runner` can run. `Builder::build` does not run
+/// `setup`, so no window is created. The app context is the shipped one, so
+/// sidecar/runtime paths resolve exactly like production; the only app-data
+/// write is the servant-catalog seed below (the real app re-downloads the
+/// asset pack on top of it).
+fn harness_app() -> Result<tauri::AppHandle, String> {
+    use tauri::Manager;
+    let app = tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .build(tauri::generate_context!())
+        .map_err(|e| format!("构建 Tauri 上下文失败: {e}"))?;
+    let handle = app.handle().clone();
+    handle.manage(TouchControlSettingsState::default());
+    seed_catalogs(&handle)?;
+    Ok(handle)
+}
+
+/// `SidecarClient::spawn` requires the installed servant catalog JSON. On a
+/// checkout without the downloaded asset pack, seed the offline test
+/// fixtures so the spawn check passes; support-servant matching falls back
+/// to OCR either way.
+fn seed_catalogs(app: &tauri::AppHandle) -> Result<(), String> {
+    let catalogs = crate::paths::app_assets_dir(app).join("catalogs");
+    if catalogs.join("servants.json").is_file() {
+        return Ok(());
+    }
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("catalogs");
+    std::fs::create_dir_all(&catalogs).map_err(|e| format!("创建 catalogs 目录失败: {e}"))?;
+    for entry in std::fs::read_dir(&fixtures)
+        .map_err(|e| format!("读取目录 {} 失败: {e}", fixtures.display()))?
+    {
+        let entry = entry.map_err(|e| format!("遍历 catalogs 失败: {e}"))?;
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "json") {
+            std::fs::copy(&path, catalogs.join(entry.file_name()))
+                .map_err(|e| format!("复制 {} 失败: {e}", path.display()))?;
+        }
+    }
+    eprintln!("[harness] 已用离线快照填充 catalogs: {}", catalogs.display());
+    Ok(())
+}
+
+fn input_size_for_taps(adb_size: Option<(u32, u32)>, stream_size: (u32, u32)) -> (u32, u32) {
+    let Some((adb_w, adb_h)) = adb_size else {
+        return stream_size;
+    };
+    let (stream_w, stream_h) = stream_size;
+    let adb_landscape = adb_w >= adb_h;
+    let stream_landscape = stream_w >= stream_h;
+    if adb_landscape == stream_landscape {
+        (adb_w, adb_h)
+    } else {
+        (adb_h, adb_w)
+    }
+}
+
+/// The soak loop's runner config: event-farm mode with the product's apple
+/// caps, no user battle scenes (auto attack), no support pinning (first row).
+fn run_loop_config(options: &HarnessOptions) -> Result<RunConfig, String> {
+    let event_farm = match options.target_quest.as_deref() {
+        Some(target) => serde_json::json!({ "targetQuest": target }),
+        None => serde_json::json!({}),
+    };
+    serde_json::from_value(serde_json::json!({
+        "projectId": "event-harness",
+        "eventFarm": event_farm,
+        "maxMissionRuns": options.max_quests,
+        "maxSupportScrolls": 3,
+        "servantSelections": [],
+        "apRecoveryItems": ["silver", "bronze", "copper"],
+        "apRecoveryLimits": { "rainbow": 0, "gold": 0, "silver": 10, "bronze": 10, "copper": 10 },
+    }))
+    .map_err(|e| format!("构建 RunConfig 失败: {e}"))
+}
+
+fn run_loop(options: &HarnessOptions) -> Result<serde_json::Value, String> {
+    let handle = harness_app()?;
+    let server = Server::Cn;
+
+    // 无窗口时 runner 的事件本来无人接收；转到 stdout 便于 soak 事后排查。
+    {
+        use tauri::Listener as _;
+        handle.listen("automation-status", |event| {
+            println!("[runner] {}", event.payload());
+        });
+        handle.listen("battle-run-progress", |event| {
+            println!("[progress] {}", event.payload());
+        });
+    }
+
+    let adb_exe = dev_resource("adb").join("adb.exe");
+    let adb = connect_device_exe(&adb_exe, options.serial.as_deref())?;
+
+    let mut sidecar = crate::screen::SidecarClient::spawn(
+        &handle,
+        &crate::resolve_template_dirs(&handle, server),
+        &crate::resolve_cv_config_paths(&handle, server),
+        server,
+    )
+    .map_err(|e| format!("sidecar 启动失败: {e}"))?;
+    eprintln!("[harness] sidecar 已就绪（生产 SidecarClient）");
+
+    let jar = crate::commands::runtime::resolve_scrcpy_jar(&handle)
+        .ok_or("找不到 scrcpy-server.jar 资源")?;
+    let (frame_w, frame_h) = sidecar
+        .start_stream(&adb, &jar, STREAM_MAX_SIZE, STREAM_BIT_RATE, STREAM_MAX_FPS)
+        .map_err(|e| format!("启动视频流失败: {e}"))?;
+    eprintln!("[harness] 视频流: {frame_w}x{frame_h}");
+    let input_size = input_size_for_taps(adb.screen_size(), (frame_w, frame_h));
+
+    let config = run_loop_config(options)?;
+    let state = Arc::new(Mutex::new(RunnerState::Starting));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let stop_after_current = Arc::new(AtomicBool::new(false));
+    let team_verification = Arc::new(Mutex::new(TeamVerificationControl::default()));
+
+    let runner = Runner::new(
+        adb,
+        sidecar,
+        config,
+        Vec::new(),
+        false,
+        Vec::new(),
+        handle.clone(),
+        state.clone(),
+        cancel,
+        stop_after_current,
+        Some(input_size),
+        Some((frame_w, frame_h)),
+        crate::commands::runtime::resolve_servant_assets_dir(&handle),
+        crate::commands::runtime::resolve_ce_assets_dir(&handle),
+        None,
+        server,
+        None,
+        None,
+        team_verification,
+        Vec::new(),
+        None,
+    );
+    eprintln!(
+        "[harness] 启动活动刷本 soak（目标关卡 {:?}，最多 {} 个本）…",
+        options.target_quest, options.max_quests
+    );
+    runner.run();
+    Ok(serde_json::json!({
+        "finalState": state.lock().map(|state| state.status()).unwrap_or("unknown"),
+    }))
 }
 
 #[cfg(test)]
@@ -727,8 +923,59 @@ mod tests {
     #[test]
     fn parse_args_rejects_unknown_flags_and_phases() {
         assert!(parse_args(&["--bogus".into(), "x".into()]).is_err());
-        assert!(parse_args(&[arg("--phase", "loop")]).is_err());
+        assert!(parse_args(&[arg("--phase", "soak")]).is_err());
         assert!(parse_args(&["--serial".into(), "1.2.3.4:5555".into()]).is_err());
+    }
+
+    #[test]
+    fn parse_args_defaults_the_loop_quest_cap() {
+        let args = vec!["--phase".into(), "loop".into()];
+        let options = parse_args(&args).unwrap();
+        assert_eq!(options.phase, HarnessPhase::Loop);
+        assert_eq!(options.max_quests, DEFAULT_MAX_QUESTS);
+
+        let args = vec!["--phase".into(), "loop".into(), "--max-quests".into(), "3".into()];
+        let options = parse_args(&args).unwrap();
+        assert_eq!(options.max_quests, 3);
+        assert!(parse_args(&[
+            "--max-quests".into(),
+            "0".into(),
+            "--phase".into(),
+            "loop".into()
+        ])
+        .is_err());
+        assert!(parse_args(&[
+            "--max-quests".into(),
+            "x".into(),
+            "--phase".into(),
+            "loop".into()
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn soak_loop_config_caps_apples_and_sets_the_run_cap() {
+        let options = HarnessOptions {
+            serial: None,
+            phase: HarnessPhase::Loop,
+            target_quest: None,
+            out_dir: PathBuf::from(".screenshots"),
+            max_quests: 4,
+        };
+        let config = run_loop_config(&options).unwrap();
+        assert_eq!(config.max_mission_runs, Some(4));
+        assert_eq!(config.event_farm, Some(Default::default()));
+        let limits = config.ap_recovery_limits;
+        assert_eq!(limits.silver, Some(crate::runner::EVENT_APPLE_LIMIT));
+        assert_eq!(limits.bronze, Some(crate::runner::EVENT_APPLE_LIMIT));
+        assert_eq!(limits.copper, Some(crate::runner::EVENT_APPLE_LIMIT));
+        assert_eq!(limits.rainbow, Some(0));
+        assert_eq!(limits.gold, Some(0));
+        assert!(config.ap_recovery_items.contains(&crate::runner::ApRecoveryItem::Silver));
+        assert!(config.ap_recovery_items.contains(&crate::runner::ApRecoveryItem::Bronze));
+        assert!(config.ap_recovery_items.contains(&crate::runner::ApRecoveryItem::Copper));
+        assert!(!config.ap_recovery_items.contains(&crate::runner::ApRecoveryItem::Gold));
+        assert!(!config.ap_recovery_items.contains(&crate::runner::ApRecoveryItem::Rainbow));
     }
 
     #[test]

@@ -423,15 +423,53 @@ impl Runner {
             .as_ref()
             .map(|runtime| runtime.phase)
             .unwrap_or(EventFarmPhase::NeedMap);
-        if phase != EventFarmPhase::AwaitingNodeDetail {
-            self.emit_debug("NodeDetail", "任务卡已打开，但活动流程未在等它；等待下一帧");
+        if phase == EventFarmPhase::AwaitingNodeDetail {
+            self.emit("NodeDetail", "点击 ▶ 进入任务");
+            if self.tap_at("NodeDetail", Point::new(NODE_FORWARD.0, NODE_FORWARD.1)) {
+                if let Some(runtime) = self.event_farm_runtime.as_mut() {
+                    runtime.phase = EventFarmPhase::AwaitingBattle;
+                }
+                thread::sleep(ACTION_DELAY);
+            }
             return Ok(());
         }
-        self.emit("NodeDetail", "点击 ▶ 进入任务");
-        if self.tap_at("NodeDetail", Point::new(NODE_FORWARD.0, NODE_FORWARD.1)) {
-            if let Some(runtime) = self.event_farm_runtime.as_mut() {
-                runtime.phase = EventFarmPhase::AwaitingBattle;
+        if phase == EventFarmPhase::AwaitingBattle {
+            // ▶ was tapped but the card is still open: the tap missed or
+            // this card offers no ▶ at all — the completed last-run card
+            // replaces the button with the mission-progress box. Retry a
+            // bounded number of times, then blacklist the label, close
+            // the card and pick a different quest.
+            let attempts = self
+                .event_farm_runtime
+                .as_mut()
+                .map(|runtime| {
+                    runtime.label_attempts += 1;
+                    runtime.label_attempts
+                })
+                .unwrap_or(0);
+            if attempts > MAX_CARD_ATTEMPTS {
+                self.blacklist_pending_label("NodeDetail", "多次点击 ▶ 仍未进入任务");
+                self.apply_backoff("NodeDetail");
+                if let Some(runtime) = self.event_farm_runtime.as_mut() {
+                    runtime.phase = EventFarmPhase::NeedMap;
+                }
+                self.tap_at("NodeDetail", Point::new(CARD_CLOSE.0, CARD_CLOSE.1));
+                thread::sleep(ACTION_DELAY);
+                return Ok(());
             }
+            self.emit_warn(
+                "NodeDetail",
+                &format!("点击 ▶ 后仍停在任务卡，重试 ({attempts}/{MAX_CARD_ATTEMPTS})"),
+            );
+            if self.tap_at("NodeDetail", Point::new(NODE_FORWARD.0, NODE_FORWARD.1)) {
+                thread::sleep(ACTION_DELAY);
+            }
+            return Ok(());
+        }
+        // The card is open while the flow wants the map — a leftover from
+        // an earlier state or a missed close tap. Tap 关闭 until it goes.
+        self.emit_debug("NodeDetail", "任务卡未在等待中，点击「关闭」回到地图");
+        if self.tap_at("NodeDetail", Point::new(CARD_CLOSE.0, CARD_CLOSE.1)) {
             thread::sleep(ACTION_DELAY);
         }
         Ok(())
