@@ -55,6 +55,9 @@ const REPEAT_CONFIRM_CLOSE: (f64, f64) = (700.0 / 1920.0, 875.0 / 1080.0);
 /// Servant-full dialog 「关闭」 — never 变还 / 强化 / 灵基保管室
 /// (reference `nav.SERVANT_FULL_CLOSE`).
 const SERVANT_FULL_CLOSE: (f64, f64) = (860.0 / 1920.0, 720.0 / 1080.0);
+/// Reward-notice confirmation (宝具强化专用灵基) 「关闭」, measured on the
+/// Hallowe'en 2026 CN dialog (button centered at (960, 850)).
+const NP_CE_NOTICE_CLOSE: (f64, f64) = (960.0 / 1920.0, 850.0 / 1080.0);
 /// How often one label may be tapped (or fail to be found) before the run
 /// gives up on that card instead of silently burning AP on a half-understood
 /// map.
@@ -185,6 +188,7 @@ impl Runner {
             Screen::TapContinue => self.handle_tap_continue(),
             Screen::Tip => self.handle_tip_quit(),
             Screen::ListUpdate => self.handle_list_update(),
+            Screen::NpCeNotice => self.handle_np_ce_notice(),
             Screen::RepeatConfirm => self.handle_repeat_confirm(),
             Screen::ServantFull => self.handle_servant_full(),
             Screen::Defeat => self.handle_defeat(),
@@ -259,6 +263,19 @@ impl Runner {
     fn handle_list_update(&mut self) -> AutomationResult<()> {
         self.emit("ListUpdate", "列表更新弹窗，点击「否」");
         if self.tap_at("ListUpdate", Point::new(LIST_UPDATE_NO.0, LIST_UPDATE_NO.1)) {
+            thread::sleep(ACTION_DELAY);
+        }
+        Ok(())
+    }
+
+    /// Reward-notice confirmation (～关于宝具强化专用灵基～). The dialog has
+    /// no other interactive element, so 关闭 is the only safe tap.
+    fn handle_np_ce_notice(&mut self) -> AutomationResult<()> {
+        self.emit("NpCeNotice", "宝具强化专用灵基说明弹窗，点击「关闭」");
+        if self.tap_at(
+            "NpCeNotice",
+            Point::new(NP_CE_NOTICE_CLOSE.0, NP_CE_NOTICE_CLOSE.1),
+        ) {
             thread::sleep(ACTION_DELAY);
         }
         Ok(())

@@ -30,6 +30,16 @@
       "image": "screenshots/support_select_cn_device_halloween2026.png",
       "expectedScreen": "SupportSelect",
       "server": "cn"
+    },
+    {
+      "image": "screenshots/reward_notice_cn_device_halloween2026.png",
+      "expectedScreen": "NpCeNotice",
+      "server": "cn"
+    },
+    {
+      "image": "screenshots/tap_continue_cn_device_halloween2026.png",
+      "expectedScreen": "TapContinue",
+      "server": "cn"
     }
   ],
   "findElement": [

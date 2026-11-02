@@ -928,6 +928,9 @@ pub enum Screen {
     RepeatConfirm,
     /// Support-list "成员列表将更新" confirmation.
     ListUpdate,
+    /// "～关于宝具强化专用灵基～" reward-notice confirmation dialog
+    /// (awarded an NP-strengthening-dedicated craft essence).
+    NpCeNotice,
     Unknown,
 }
 
@@ -976,6 +979,7 @@ pub(crate) const EVENT_ONLY_DETECTION_SCREENS: &[&str] = &[
     "PartyConfirm",
     "RepeatConfirm",
     "ListUpdate",
+    "NpCeNotice",
 ];
 
 impl std::fmt::Display for Screen {
@@ -1014,6 +1018,7 @@ impl std::fmt::Display for Screen {
             Self::PartyConfirm => write!(f, "PartyConfirm"),
             Self::RepeatConfirm => write!(f, "RepeatConfirm"),
             Self::ListUpdate => write!(f, "ListUpdate"),
+            Self::NpCeNotice => write!(f, "NpCeNotice"),
             Self::Unknown => write!(f, "Unknown"),
         }
     }
@@ -1059,6 +1064,7 @@ impl FromStr for Screen {
             "PartyConfirm" => Self::PartyConfirm,
             "RepeatConfirm" => Self::RepeatConfirm,
             "ListUpdate" => Self::ListUpdate,
+            "NpCeNotice" => Self::NpCeNotice,
             _ => Self::Unknown,
         };
         Ok(screen)

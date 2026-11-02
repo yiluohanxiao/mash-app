@@ -211,6 +211,7 @@ impl Runner {
                 | Screen::TapContinue
                 | Screen::Tip
                 | Screen::ListUpdate
+                | Screen::NpCeNotice
                 | Screen::RepeatConfirm
                 | Screen::ServantFull
                 | Screen::Defeat

@@ -693,7 +693,7 @@
     "TapContinue": {
       "detect": {
         "keywords": ["请点击游戏界面"],
-        "region": { "x": 0.3125, "y": 0.8565, "w": 0.375, "h": 0.088 },
+        "region": { "x": 0.3125, "y": 0.8565, "w": 0.375, "h": 0.1435 },
         "minScore": 0.5,
         "priority": 35
       },
@@ -817,6 +817,16 @@
     },
     "Cg": {
       "$comment": "Reserved: full-screen CG/animation has no readable text, so it stays undetected and is observed as Unknown (wait, never tap).",
+      "variants": { "main": { "elements": {} } }
+    },
+    "NpCeNotice": {
+      "$comment": "Reward-notice confirmation dialog (obtained an NP-strengthening-dedicated craft essence). Sits on top of the CE reward art, which matches no template, so a plain keyword probe works.",
+      "detect": {
+        "keywords": ["宝具强化专用灵基"],
+        "region": { "x": 0.24, "y": 0.16, "w": 0.52, "h": 0.14 },
+        "minScore": 0.5,
+        "priority": 42
+      },
       "variants": { "main": { "elements": {} } }
     }
   }
