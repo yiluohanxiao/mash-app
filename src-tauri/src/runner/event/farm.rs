@@ -729,8 +729,24 @@ impl Runner {
 
     /// Cards from the 3-hour scan cache, or a live scan (saved back). After
     /// a settlement, `rescan` limits the live scan to newly visible /
-    /// newly unlocked labels and merges with the cached list.
+    /// newly unlocked labels and merges with the cached list. A scan that
+    /// fails because a quest card is open over the map gets one recovery
+    /// attempt (see `close_open_quest_card`) before the error propagates.
     fn event_scan_cards(&mut self, rescan: bool) -> Result<Vec<QuestCard>, String> {
+        match self.event_scan_cards_inner(rescan) {
+            Ok(cards) => Ok(cards),
+            Err(error) => {
+                self.emit_warn("EventMap", &format!("扫描失败: {error}"));
+                if !self.close_open_quest_card() {
+                    return Err(error);
+                }
+                self.emit("EventMap", "已关闭遮挡的任务卡，重试扫描");
+                self.event_scan_cards_inner(rescan)
+            }
+        }
+    }
+
+    fn event_scan_cards_inner(&mut self, rescan: bool) -> Result<Vec<QuestCard>, String> {
         let path = self.scan_cache_path();
         let cached = path.as_deref().and_then(fresh_scan_cache);
         if !rescan {
@@ -774,6 +790,39 @@ impl Runner {
                 .map_err(|error| format!("写入扫图缓存失败: {error}"))?;
         }
         Ok(outcome.cards)
+    }
+
+    /// Close a quest-detail card that is open over the map (the client
+    /// re-opens the last-run card after a settlement, or a scan drag
+    /// landed on a node) and wait for the map to come back. Every scan
+    /// pre-check fails while the card is up, so `event_scan_cards` calls
+    /// this once before giving up. Returns true when the card is gone —
+    /// whether the map is behind it or not; the scan's own pre-check
+    /// reports a non-map screen with its usual error.
+    fn close_open_quest_card(&mut self) -> bool {
+        let screen = match self.sidecar().detect(None) {
+            Ok(screen) => screen,
+            Err(_) => return false,
+        };
+        if screen != Screen::NodeDetail {
+            return false;
+        }
+        self.emit_warn("NodeDetail", "扫描时任务卡仍开着，点击「关闭」后重试");
+        for _ in 0..NODE_CLOSE_MAX {
+            if !self.tap_at("NodeDetail", Point::new(CARD_CLOSE.0, CARD_CLOSE.1)) {
+                return false;
+            }
+            // Same guard as the leftover-card branch: after the card
+            // closes, this coordinate is the map's back arrow.
+            thread::sleep(super::scan::TAP_SETTLE);
+            thread::sleep(NODE_CLOSE_MIN_INTERVAL);
+            match self.sidecar().detect(None) {
+                Ok(Screen::NodeDetail) => continue,
+                Ok(_) => return true,
+                Err(_) => return false,
+            }
+        }
+        false
     }
 
     fn select_event_target(&mut self) -> Result<QuestCard, String> {
