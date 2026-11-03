@@ -198,6 +198,14 @@ impl Runner {
                     last_detected_screen = screen;
                     self.handle_ap_recovery()?;
                 }
+                // A new command-code drop pushes its detail page over the
+                // settlement chain in any mode; closing it resumes the
+                // normal flow underneath.
+                Screen::CommandCodeDetail => {
+                    unknown_count = 0;
+                    last_detected_screen = screen;
+                    self.handle_command_code_detail()?;
+                }
                 // Event-farm mode routes the map/entry screens and the
                 // event-only dialogs through the event runtime; ordinary
                 // runs never see them (battle detection scope excludes
@@ -302,6 +310,16 @@ impl Runner {
     }
 
     // -- battle screen handlers ----------------------------------------------
+
+    /// Command-code detail page: only 关闭 dismisses it; the settlement
+    /// chain continues on the screen underneath.
+    fn handle_command_code_detail(&mut self) -> AutomationResult<()> {
+        self.emit("CommandCodeDetail", "掉落指令码详情页，点击左上「关闭」");
+        if self.tap_at("CommandCodeDetail", COMMAND_CODE_DETAIL_CLOSE) {
+            thread::sleep(ACTION_DELAY);
+        }
+        Ok(())
+    }
 
     fn skip_attack_animation_if_due(&mut self, screen: Screen, actionable: bool) -> bool {
         if self

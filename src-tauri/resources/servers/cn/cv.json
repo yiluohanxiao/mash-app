@@ -848,6 +848,16 @@
         "priority": 70
       },
       "variants": { "main": { "elements": {} } }
+    },
+    "CommandCodeDetail": {
+      "$comment": "New command-code drop detail page, pushed automatically over the settlement chain in any battle mode. Only control is the top-left 关闭; probed on the 持有技能 panel label, whose position is fixed on this page.",
+      "detect": {
+        "keywords": ["持有技能"],
+        "region": { "x": 0.36, "y": 0.24, "w": 0.20, "h": 0.10 },
+        "minScore": 0.5,
+        "priority": 45
+      },
+      "variants": { "main": { "elements": {} } }
     }
   }
 }

@@ -42,6 +42,10 @@ pub(crate) const BATTLE_RESULT_CONTINUE_STOP: Point = Point::new(0.348, 0.809);
 /// Same physical position as the battle animation-skip button, but kept as
 /// a separate semantic constant so result-popup behavior can be tuned alone.
 pub(crate) const BATTLE_RESULT_POPUP_SKIP: Point = Point::new(0.685, 0.095);
+/// 关闭 on the command-code detail page the client pushes over the
+/// settlement chain whenever a battle drops a new command code
+/// (measured on the Hallowe'en 2026 CN drop at (60, 63)).
+pub(crate) const COMMAND_CODE_DETAIL_CLOSE: Point = Point::new(60.0 / 1920.0, 63.0 / 1080.0);
 
 /// Cadence used by `tap_until_screen_changes` when dismissing post-battle
 /// result pages. Slow enough for the device to register each tap and for

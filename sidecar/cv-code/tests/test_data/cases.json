@@ -45,6 +45,11 @@
       "image": "screenshots/game_notice_cn_device_halloween2026.png",
       "expectedScreen": "GameNotice",
       "server": "cn"
+    },
+    {
+      "image": "screenshots/command_code_detail_cn_device_halloween2026.png",
+      "expectedScreen": "CommandCodeDetail",
+      "server": "cn"
     }
   ],
   "findElement": [

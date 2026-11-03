@@ -935,6 +935,9 @@ pub enum Screen {
     /// schedule; it can cover any screen mid-run and only offers the
     /// top-right ✕.
     GameNotice,
+    /// Command-code detail page pushed automatically whenever a battle
+    /// drops a new command code; only the top-left 关闭 dismisses it.
+    CommandCodeDetail,
     Unknown,
 }
 
@@ -956,6 +959,7 @@ pub(crate) const BATTLE_DETECTION_SCREENS: &[&str] = &[
     "BattleResultContinue",
     "BattleResultFriendRequest",
     "APRecovery",
+    "CommandCodeDetail",
 ];
 
 /// Extra screens the event-farm runtime needs on top of the battle scope.
@@ -1025,6 +1029,7 @@ impl std::fmt::Display for Screen {
             Self::ListUpdate => write!(f, "ListUpdate"),
             Self::NpCeNotice => write!(f, "NpCeNotice"),
             Self::GameNotice => write!(f, "GameNotice"),
+            Self::CommandCodeDetail => write!(f, "CommandCodeDetail"),
             Self::Unknown => write!(f, "Unknown"),
         }
     }
@@ -1072,6 +1077,7 @@ impl FromStr for Screen {
             "ListUpdate" => Self::ListUpdate,
             "NpCeNotice" => Self::NpCeNotice,
             "GameNotice" => Self::GameNotice,
+            "CommandCodeDetail" => Self::CommandCodeDetail,
             _ => Self::Unknown,
         };
         Ok(screen)
