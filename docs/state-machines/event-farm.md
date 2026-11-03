@@ -11,10 +11,10 @@
 
 已完成：
 
-- `Screen` 共 20 个活动画面：M0 的 `EventMap`、`Terminal`、`NodeDetail`、`QuestConfirm`、
+- `Screen` 共 21 个活动画面：M0 的 `EventMap`、`Terminal`、`NodeDetail`、`QuestConfirm`、
   `Story`、`SkipConfirm`、`TapContinue`、`Loading`、`Title`、`Defeat`、`Busy`、`Cg`，
   加 M1 的 `RewardSelect`、`RewardPage`、`ServantFull`、`Gate`、`Tip`、`PartyConfirm`、
-  `RepeatConfirm`、`ListUpdate`。
+  `RepeatConfirm`、`ListUpdate`，加 N2 的 `NpCeNotice`、`GameNotice`。
 - `cn/cv.json` 对应关键词/亮度探针；`ListUpdate` 用 `overrides` 抢回被 `SupportSelect`
   模板命中的刷新确认框。
 - sidecar 识别为三段式：模板 → 关键词 → 亮度，先命中先返回；模板命中可被 `overrides`
@@ -72,6 +72,7 @@
 | `ServantFull` | 中带 `从者数已超上限` / `从者空位` | 78 | 从者已满弹窗；出现即停，不能替用户删从者 |
 | `RewardSelect` | 顶带 `活动奖励画面选择` | 75 | 奖励选择页；只读 |
 | `Title` | 左下 `版本号` | 70 | 游戏被重启后回到标题页 |
+| `GameNotice` | 顶中 `游戏公告` | 70 | 客户端自行推送的游戏公告弹窗，会盖在任何画面上；点右上 ✕ (1865,45) 关闭 |
 | `Gate` | 右上 `迦勒底之门`/`迦勒底之`/`勒底之` 且左上 `关闭` | 65 | 自由本列表；与 `NodeDetail` 共用 `关闭`，必须压过它 |
 | `EventMap` | 左上 `管理室` | 60 | 活动地图；区域标签位置需 OCR 现找，不能写死 |
 | `Terminal` | 左上 `通知` | 55 | 终端；点活动横幅进入地图 |
@@ -82,6 +83,7 @@
 | `PartyConfirm` | 顶右 `冠位编队` / `助战编队` | 44 | 编队确认框；比 `Title`/`Tip` 低，避免抢走同区文字 |
 | `ListUpdate` | 中带 `将更新` / `成员列表`，`overrides: ["SupportSelect"]` | 43 | 助战列表刷新确认框；模板先命中 `SupportSelect` |
 | `RepeatConfirm` | 中带 `连续进行同一关卡` / `连续出击` | 42 | 连续出击确认；只有明确要求时才点“是” |
+| `NpCeNotice` | 中带 `宝具强化专用灵基` | 42 | 战斗结算后“获得 NP 强化专用灵基”弹窗；模板匹配 ✕ (region 0.32/0.70/0.36/0.16)，找不到再点坐标兜底 |
 | `RewardPage` | 右上 `点数报酬` / `道具兑换` | 40 | 点数报酬页；只读 |
 | `TapContinue` | 中下 `请点击游戏界面` | 35 | 通用“点击继续” |
 | `NodeDetail` | 左上 `关闭` 且卡片区 `消耗` / `任务进行度` / `首次报酬` / `推荐` | 30 | 任务信息卡；两段都命中才成立 |
@@ -123,7 +125,7 @@ M1 只做「缩到最小后一屏放下」这一种扫法。
 活动模式由现有 `Runner` 内的 `EventFarmRuntime` 驱动（决策 A：不建第二个 runner 进程，
 沿用 rank-up quest 的挂载方式）。启动命令 `start_event_farm_automation` 复用战斗启动链
 （设备租约记为 `AutomationKind::EventFarm`），识别范围切到 `use_event_detection()`；
-主循环把 13 个活动画面路由进 `runner/event/farm.rs`：
+主循环把 15 个活动画面路由进 `runner/event/farm.rs`：
 
 | 画面 | 动作 | 之后 |
 | --- | --- | --- |
@@ -133,6 +135,8 @@ M1 只做「缩到最小后一屏放下」这一种扫法。
 | `Gate` | 进关途中误入自由本列表：只点左上「关闭」 | 回 `EventMap` 重试 |
 | `Story` / `SkipConfirm` | 右上「跳过」（1786,60）→ 确认「是」（1241,840） | 主线解锁剧情被跳过 |
 | `TapContinue` | 点「请点击游戏界面」避开 toast 的位置（960,400） | 继续流程 |
+| `GameNotice` | 点右上 ✕（1865,45），不碰公告内容 | 弹窗消失，下一帧回到被盖住的原画面 |
+| `NpCeNotice` | 模板匹配弹窗 ✕ 并点击；模板未命中再点参考坐标（963,847） | 结算流程继续 |
 | `Tip` | 只点「退出」（975,845），绝不点确定/充值 | 弹窗消失 |
 | `ListUpdate` | 点「否」（592,755），不刷新助战列表 | 弹窗消失 |
 | `RepeatConfirm` | 点「关闭」（700,875），不点「连续出击」 | 由选卡策略决定下一个本 |
@@ -153,7 +157,9 @@ M1 只做「缩到最小后一屏放下」这一种扫法。
 结算页 `BattleResultContinue` 在活动模式下先做与重复任务相同的每轮重置（轮数 +1、
 队伍/战斗状态清零），未达 `max_mission_runs` 且未勾选「打完本轮停止」时点「结束」→
 `AwaitingReturnToMap`，下一次 `EventMap` 观测触发增量重扫并继续循环；达到上限或勾选
-停止则照旧 `Finished`。
+停止则照旧 `Finished`。结算后的过渡帧常被观测为 `Unknown`：普通战斗模式会在结算页
+固定跳过点盲点一下，活动模式下已禁用——该点只对普通结算页安全，在活动过渡帧上会落在
+地图/主页边框上（soak 8b 实测踩过），只等待下一帧自行识别。
 
 从 `SupportSelect` / `TeamConfirm` / `Battle` / 结算 onward 全部走现有战斗处理器，
 队伍、助战、技能配置沿用所选编队项目。

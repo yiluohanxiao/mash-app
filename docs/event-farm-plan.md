@@ -722,6 +722,27 @@ stdout（无窗口时事件原本无人接收，出问题无法排查）。
 
 目标：P8 实机长跑 → P9/P10 缺陷修复 → 可选 M5/M6（见 OVERNIGHT-GOAL.md）。
 
+### P8 soak 8b（续跑，又停 2/10 → 第三处缺陷）
+
+- 前情：soak 8 完成 5/10，第 4→5 本间一次银苹果恢复（银 1/10）。
+- soak 8b 完成 2/10（累计 7 本，点数 800,760 → 983,010），其中 run 1 验证了 3 秒间隔
+  关闭守卫生效（单次关闭后直接回 `EventMap`）。
+- 停止原因：增量重扫报「拖动到地图边界时离开了活动地图」→「当前不在活动地图，无法
+  扫描」→ Unknown 循环安全停止。现场帧是客户端自行推送的**游戏公告弹窗**盖在通知页上：
+  `GameNotice` 没有识别条目（顶中「游戏公告」四个字），永不命中，弹窗后一切点击都被它
+  挡住。
+- 现场截图：`.screenshots/soak8b-stop2.png`（已脱敏为语料夹具）。
+- 修复（本节，未提交时记录）：
+  1. 新增 `Screen::GameNotice`（关键词「游戏公告」，region 0.40/0/0.20/0.09，
+     priority 70）+ `handle_game_notice`：点右上 ✕（1865,45），不碰公告内容。
+  2. 活动模式下结算页 `Unknown` 的盲点跳过区点击禁用：固定跳过点只对普通结算页安全，
+     活动过渡帧上落在地图/主页边框（`engine.rs` 判定 `is_battle_result_screen(last) &&
+     !event_farm_active()`）。
+  3. sidecar 语料：脱敏夹具 `game_notice_cn_device_halloween2026.png`（banner 图涂灰）+
+     detect 用例 1 条；修正 cv.json 编辑时误留的重复右括号（sidecar detect_screen 集成
+     测试测出 load_config 全挂）。
+- 苹果累计（本夜）：银 2/10、铜 0/10、金/彩/圣晶石 0。
+
 ### P8 soak 8（首次长跑，`--max-quests 10`）
 
 - 启动前状态：游戏重启走完启动链（公告/宣传/灵脉石赠礼/友情点数弹窗共 5 个弹窗手动
@@ -752,4 +773,33 @@ stdout（无窗口时事件原本无人接收，出问题无法排查）。
 - `handle_np_ce_notice` 模板定位优先，固定坐标 (960,850) 兜底。
 - sidecar 语料：findElement 用例 1 条；detect-then-find 管线用例改为跟随 detect 用例的
   server 字段（CN 屏需要 CN 配置 + set_server），全量 pytest 28 失败均为已知环境项。
+
+### P11 M5 每日任务：评估结论 = 只写设计，不动代码
+
+参考 `reference/fgo-auto/flow.py` `run_daily`（终端 → 迦勒底之门 → 每日任务 → 打 N 把，
+每把从终端重新选本）与 `daily.py`（只认标题里的档位/篇，不看 AP、不看行号）。
+
+耦合评估：mash 现有自动化从 `SupportSelect` 起接管，**完全没有** 终端 → 迦勒底之门 →
+每日任务列表 的画面链：`cv.json` 无 ChaldeaGate / DailyQuest 检测，`Screen` 枚举无对应
+变体，`Runner` 无终端导航。做 M5 等于新建一条与活动地图平行的导航链（新检测配置 + 新
+画面变体 + 档位标题 OCR + 新状态机），复用的只有战斗引擎与苹果恢复。与 EventFarmRuntime
+本身没有可共享的状态机（活动刷本的 `EventScanner`/扫图缓存/任务卡规划对每日任务全部
+无用），属于里程碑级新特性而非本分支的延伸。
+
+结论：不在活动分支实现。设计要点留档（供后续独立分支使用）：
+1. `--phase daily`（harness）与正式页入口并列；配置：档位（初级~超级/地狱级）、篇
+   （如「搜集种火」）、最多把数、苹果策略复用现有限额。
+2. 画面链 `Terminal → ChaldeaGate → DailyQuestList → PartyConfirm/SupportSelect`；
+   选本只认标题 OCR 的档位/篇（活动半减会改 AP、活动期行数不固定，都不看）。
+3. 每把打完结算回终端重新选本（沿用 `BattleResultContinue` 非活动分支的重置逻辑）；
+   「连续关卡」弹窗关闭而非确认，选本策略保持单点真相。
+4. 风险：每日任务列表的标题 OCR 需要新语料；档位按钮样式随活动变化，需实测裁剪。
+
+### P12 打包验证
+
+`pnpm tauri build` 通过：lint / tsc / vitest / vite build / Rust release 全绿，NSIS
+安装包产物正常生成。收尾时 updater 签名报 "A public key has been found, but no private
+key. Set TAURI_SIGNING_PRIVATE_KEY"——这是发布环境的签名私钥缺失（只影响更新签名步骤），
+不是本分支代码缺陷；P12 的验证目标（可构建、可产出安装包）达成。
+
 
