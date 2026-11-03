@@ -58,6 +58,9 @@ const SERVANT_FULL_CLOSE: (f64, f64) = (860.0 / 1920.0, 720.0 / 1080.0);
 /// Reward-notice confirmation (宝具强化专用灵基) 「关闭」, measured on the
 /// Hallowe'en 2026 CN dialog (button centered at (960, 850)).
 const NP_CE_NOTICE_CLOSE: (f64, f64) = (960.0 / 1920.0, 850.0 / 1080.0);
+/// 游戏公告 dialog top-right ✕ (client-pushed announcement, can cover any
+/// screen mid-run; the ✕ is the dialog's only control).
+const GAME_NOTICE_CLOSE: (f64, f64) = (1865.0 / 1920.0, 45.0 / 1080.0);
 /// Template + search region for the same button (element `close_button`
 /// in the CN config); the fixed coordinate above stays as the fallback.
 const NP_CE_NOTICE_CLOSE_TEMPLATE: &str = "button_np_ce_notice_close";
@@ -263,6 +266,7 @@ impl Runner {
             Screen::Tip => self.handle_tip_quit(),
             Screen::ListUpdate => self.handle_list_update(),
             Screen::NpCeNotice => self.handle_np_ce_notice(),
+            Screen::GameNotice => self.handle_game_notice(),
             Screen::RepeatConfirm => self.handle_repeat_confirm(),
             Screen::ServantFull => self.handle_servant_full(),
             Screen::Defeat => self.handle_defeat(),
@@ -362,6 +366,17 @@ impl Runner {
         let point = located
             .unwrap_or(Point::new(NP_CE_NOTICE_CLOSE.0, NP_CE_NOTICE_CLOSE.1));
         if self.tap_at("NpCeNotice", point) {
+            thread::sleep(ACTION_DELAY);
+        }
+        Ok(())
+    }
+
+    /// 游戏公告 dialog: the client pushes announcements on its own
+    /// schedule, so it can cover the map or a transition mid-run. The ✕
+    /// is the only control; closing reveals whatever was underneath.
+    fn handle_game_notice(&mut self) -> AutomationResult<()> {
+        self.emit("GameNotice", "游戏公告弹窗，点击右上 ✕ 关闭");
+        if self.tap_at("GameNotice", Point::new(GAME_NOTICE_CLOSE.0, GAME_NOTICE_CLOSE.1)) {
             thread::sleep(ACTION_DELAY);
         }
         Ok(())
@@ -1112,6 +1127,7 @@ mod tests {
         assert_eq!(to_px(LIST_UPDATE_NO), (592, 755));
         assert_eq!(to_px(REPEAT_CONFIRM_CLOSE), (700, 875));
         assert_eq!(to_px(SERVANT_FULL_CLOSE), (860, 720));
+        assert_eq!(to_px(GAME_NOTICE_CLOSE), (1865, 45));
     }
 
     #[test]

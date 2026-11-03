@@ -212,6 +212,7 @@ impl Runner {
                 | Screen::Tip
                 | Screen::ListUpdate
                 | Screen::NpCeNotice
+                | Screen::GameNotice
                 | Screen::RepeatConfirm
                 | Screen::ServantFull
                 | Screen::Defeat
@@ -273,7 +274,12 @@ impl Runner {
                         "Unknown",
                         &unknown_screen_wait_message(self.server, unknown_count, timeout),
                     );
-                    if is_battle_result_screen(last_detected_screen) {
+                    // The fixed skip point is only safe on the ordinary
+                    // settlement pages. In the event loop every known
+                    // overlay has its own handler, and a blind tap here
+                    // landed on map/home chrome (soak 8b): just wait.
+                    if is_battle_result_screen(last_detected_screen) && !self.event_farm_active()
+                    {
                         self.emit_debug("Unknown", "结算页可能被弹窗遮挡，尝试点击跳过区域");
                         if self.tap_at("Unknown", BATTLE_RESULT_POPUP_SKIP) {
                             thread::sleep(ACTION_DELAY);

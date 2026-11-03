@@ -838,6 +838,16 @@
           }
         }
       }
+    },
+    "GameNotice": {
+      "$comment": "游戏公告 dialog the client pushes on its own schedule; it can cover any screen mid-run. Only control is the top-right ✕.",
+      "detect": {
+        "keywords": ["游戏公告"],
+        "region": { "x": 0.40, "y": 0.0, "w": 0.20, "h": 0.09 },
+        "minScore": 0.5,
+        "priority": 70
+      },
+      "variants": { "main": { "elements": {} } }
     }
   }
 }

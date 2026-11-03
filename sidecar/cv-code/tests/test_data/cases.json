@@ -40,6 +40,11 @@
       "image": "screenshots/tap_continue_cn_device_halloween2026.png",
       "expectedScreen": "TapContinue",
       "server": "cn"
+    },
+    {
+      "image": "screenshots/game_notice_cn_device_halloween2026.png",
+      "expectedScreen": "GameNotice",
+      "server": "cn"
     }
   ],
   "findElement": [

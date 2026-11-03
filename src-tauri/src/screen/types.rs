@@ -931,6 +931,10 @@ pub enum Screen {
     /// "～关于宝具强化专用灵基～" reward-notice confirmation dialog
     /// (awarded an NP-strengthening-dedicated craft essence).
     NpCeNotice,
+    /// "游戏公告" announcement dialog the client pushes on its own
+    /// schedule; it can cover any screen mid-run and only offers the
+    /// top-right ✕.
+    GameNotice,
     Unknown,
 }
 
@@ -980,6 +984,7 @@ pub(crate) const EVENT_ONLY_DETECTION_SCREENS: &[&str] = &[
     "RepeatConfirm",
     "ListUpdate",
     "NpCeNotice",
+    "GameNotice",
 ];
 
 impl std::fmt::Display for Screen {
@@ -1019,6 +1024,7 @@ impl std::fmt::Display for Screen {
             Self::RepeatConfirm => write!(f, "RepeatConfirm"),
             Self::ListUpdate => write!(f, "ListUpdate"),
             Self::NpCeNotice => write!(f, "NpCeNotice"),
+            Self::GameNotice => write!(f, "GameNotice"),
             Self::Unknown => write!(f, "Unknown"),
         }
     }
@@ -1065,6 +1071,7 @@ impl FromStr for Screen {
             "RepeatConfirm" => Self::RepeatConfirm,
             "ListUpdate" => Self::ListUpdate,
             "NpCeNotice" => Self::NpCeNotice,
+            "GameNotice" => Self::GameNotice,
             _ => Self::Unknown,
         };
         Ok(screen)
