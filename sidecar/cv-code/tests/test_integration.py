@@ -199,20 +199,24 @@ def test_find_element(case):
 def _pipeline_cases():
     """组合使用同一截图的 detect 与 find_element 用例。"""
     data = _load_cases()
-    detect_map = {c["image"]: c["expectedScreen"] for c in data.get("detect", [])}
+    detect_map = {
+        c["image"]: (c["expectedScreen"], c.get("server", "jp"))
+        for c in data.get("detect", [])
+    }
     find_cases = data.get("findElement", [])
 
     out = []
     for fc in find_cases:
         img = fc["image"]
         if img in detect_map:
+            expected_screen, server = detect_map[img]
             label = f"pipeline:{os.path.basename(img)}+{fc['templateKey']}"
-            out.append(pytest.param(img, detect_map[img], fc, id=label))
+            out.append(pytest.param(img, expected_screen, server, fc, id=label))
     return out
 
 
-@pytest.mark.parametrize("image,expected_screen,find_case", _pipeline_cases())
-def test_detect_then_find(image, expected_screen, find_case):
+@pytest.mark.parametrize("image,expected_screen,server,find_case", _pipeline_cases())
+def test_detect_then_find(image, expected_screen, server, find_case):
     """在单个 sidecar session 中执行 load → detect → find。"""
     if not _image_exists(image):
         pytest.skip(f"image not found: {image}")
@@ -222,7 +226,11 @@ def test_detect_then_find(image, expected_screen, find_case):
     region = find_case.get("region", {"x": 0, "y": 0, "w": 1, "h": 1})
     threshold = find_case.get("threshold", 0.8)
 
-    responses = _run_commands(_production_load_commands() + [
+    prefix = _production_load_commands(server)
+    if server == "cn":
+        prefix.append({"cmd": "set_server", "server": "CN"})
+
+    responses = _run_commands(prefix + [
         {"cmd": "load_templates", "dir": TEMPLATES_DIR, "append": True},
         {"cmd": "detect", "imagePath": _resolve(image)},
         {
@@ -233,18 +241,13 @@ def test_detect_then_find(image, expected_screen, find_case):
             "threshold": threshold,
         },
         {"cmd": "quit"},
-    ])
+    ], timeout=120)
 
-    assert len(responses) == 7
+    assert len(responses) == len(prefix) + 3
+    assert all(resp.get("ok") is True for resp in responses[:-2]), responses
 
-    assert responses[0].get("ok") is True
-    assert responses[1].get("ok") is True
-    assert responses[2].get("ok") is True
-    assert responses[3].get("ok") is True
-    assert responses[4].get("ok") is True
-
-    detect_resp = responses[5]
+    detect_resp = responses[-2]
     assert detect_resp["screen"] == expected_screen
 
-    find_resp = responses[6]
+    find_resp = responses[-1]
     assert find_resp["found"] is find_case["expectedFound"]

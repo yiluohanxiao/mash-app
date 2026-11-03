@@ -90,6 +90,18 @@
       },
       "threshold": 0.8,
       "expectedFound": false
+    },
+    {
+      "image": "screenshots/reward_notice_cn_device_halloween2026.png",
+      "templateKey": "button_np_ce_notice_close",
+      "region": {
+        "x": 0.32,
+        "y": 0.70,
+        "w": 0.36,
+        "h": 0.16
+      },
+      "threshold": 0.8,
+      "expectedFound": true
     }
   ]
 }
