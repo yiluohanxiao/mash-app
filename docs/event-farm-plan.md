@@ -713,8 +713,43 @@ stdout（无窗口时事件原本无人接收，出问题无法排查）。
 
 ### 已知限制（后续改进候选）
 
-1. 3 小时扫图缓存不感知首通：缓存里锁定的主线关首通后，下次启动仍会按主线目标
-   点开该节点，实际进入的是节点当前关卡（循环一次后增量重扫自愈）。改进方向：
-   打开任务卡后用 `read_card` 校验与 `pending_card` 一致，不一致先关卡重选。
-2. `NpCeNotice` 关闭坐标按本次弹窗实测（960, 850）；同款弹窗在其他分辨率/皮肤下
-   如按钮移位，需要补充模板或区域校验。
+1. ~~3 小时扫图缓存不感知首通~~ 已修复（第二夜，`5b46cb6`）：点 ▶ 前 `read_quest_card`
+   实读校验，不一致以实读为准重决策（合并进缓存并落盘），换卡则关闭卡片重选。
+2. ~~`NpCeNotice` 关闭坐标按实测固定~~ 已修复（第二夜）：新增
+   `button_np_ce_notice_close` 模板与 `close_button` 元素，处理时模板定位、固定坐标兜底。
+
+## 16. 第二夜执行记录（2026-11-04 凌晨）
+
+目标：P8 实机长跑 → P9/P10 缺陷修复 → 可选 M5/M6（见 OVERNIGHT-GOAL.md）。
+
+### P8 soak 8（首次长跑，`--max-quests 10`）
+
+- 启动前状态：游戏重启走完启动链（公告/宣传/灵脉石赠礼/友情点数弹窗共 5 个弹窗手动
+  关闭），主页点活动横幅进入地图；AP 142/142、苹果 0/9、歌姬点数 800,760。
+- 5/10 本完成，其中第 4→5 本间触发一次银苹果真实恢复（银 1/10）；无金/彩/圣晶石。
+- 停止原因 1（旧代码）：结算后回图时任务卡仍开着，第一次「关闭」生效后第二次同坐标
+  点击落在活动地图左上角返回箭头上，退出活动到主页 → Unknown 100 轮后安全停止
+  （主页不在活动识别范围，属预期兜底）。
+- 停止原因 2（harness 自身）：runner 报错退出时 `DiagnosticStore` 未 manage，harness
+  panic（exit 101），不影响设备状态。
+- 两处均已修复（`5b46cb6`）：卡片「关闭」点击强制 3 秒间隔、5 次上限；harness 补
+  manage。修复后重启 soak 8b 续跑。
+- 现场截图：`.screenshots/soak8-unknown.png`（主页现场）、`overnight2_0*.png`（启动链）。
+
+### P9 缺陷①进卡校验（`5b46cb6`）
+
+- `AwaitingNodeDetail` 点 ▶ 前 `read_quest_card` 实读，与 `pending_card` 比对名称+AP+等级；
+  不一致则实读卡合并进 `last_cards`（并回写扫图缓存文件），`decide_target` 重决策：
+  同标签按实读继续，换标签则关闭卡片回图重选；实读失败按缓存继续（尽力而为）。
+- 重复不一致沿用 `label_attempts`（>3 拉黑+退避）。决策核心从 `select_event_target`
+  提取为 `decide_target` 共用。新增单测 5 条（cards_differ / merge_card / decide_target）。
+
+### P10 缺陷②NpCeNotice 模板化（`5b46cb6`）
+
+- 从脱敏夹具裁「关闭」胶囊按钮，按 2560px 模板基准放大后入库
+  `servers/cn/templates/button_np_ce_notice_close.png`；cv.json `NpCeNotice.main`
+  新增 `close_button` 元素（region 0.32,0.70,0.36,0.16，threshold 0.8）。
+- `handle_np_ce_notice` 模板定位优先，固定坐标 (960,850) 兜底。
+- sidecar 语料：findElement 用例 1 条；detect-then-find 管线用例改为跟随 detect 用例的
+  server 字段（CN 屏需要 CN 配置 + set_server），全量 pytest 28 失败均为已知环境项。
+
