@@ -763,6 +763,9 @@ fn harness_app() -> Result<tauri::AppHandle, String> {
         .map_err(|e| format!("构建 Tauri 上下文失败: {e}"))?;
     let handle = app.handle().clone();
     handle.manage(TouchControlSettingsState::default());
+    // Failure diagnostics read this store; without it the runner's
+    // fail_action path panics the harness on its way out.
+    handle.manage(crate::recognition_diagnostics::DiagnosticStore::default());
     seed_catalogs(&handle)?;
     Ok(handle)
 }

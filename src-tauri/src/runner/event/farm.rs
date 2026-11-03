@@ -23,9 +23,9 @@ use super::card::{
 };
 use super::map;
 use super::scan::{save_cache, EventScanner};
-use crate::automation_error::AutomationResult;
+use crate::automation_error::{AutomationResult, AutomationResultExt};
 use crate::runner::{EventFarmConfig, Point, Runner, ACTION_DELAY};
-use crate::screen::Screen;
+use crate::screen::{NormRect, Screen};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::thread;
@@ -58,10 +58,25 @@ const SERVANT_FULL_CLOSE: (f64, f64) = (860.0 / 1920.0, 720.0 / 1080.0);
 /// Reward-notice confirmation (宝具强化专用灵基) 「关闭」, measured on the
 /// Hallowe'en 2026 CN dialog (button centered at (960, 850)).
 const NP_CE_NOTICE_CLOSE: (f64, f64) = (960.0 / 1920.0, 850.0 / 1080.0);
+/// Template + search region for the same button (element `close_button`
+/// in the CN config); the fixed coordinate above stays as the fallback.
+const NP_CE_NOTICE_CLOSE_TEMPLATE: &str = "button_np_ce_notice_close";
+const NP_CE_NOTICE_CLOSE_REGION: NormRect = NormRect {
+    x: 0.32,
+    y: 0.70,
+    w: 0.36,
+    h: 0.16,
+};
 /// How often one label may be tapped (or fail to be found) before the run
 /// gives up on that card instead of silently burning AP on a half-understood
 /// map.
 const MAX_CARD_ATTEMPTS: u32 = 3;
+/// Minimum spacing between「关闭」taps on an unexpected card: once the card
+/// closes, this coordinate is the event map's back arrow, so a rushed
+/// second tap leaves the event for the home screen.
+const NODE_CLOSE_MIN_INTERVAL: Duration = Duration::from_secs(3);
+/// A card that survives this many spaced close taps stops the run.
+const NODE_CLOSE_MAX: u32 = 5;
 /// `PartyConfirm` is never auto-confirmed; this many consecutive
 /// observations instead stop the run so the user can confirm the party.
 const PARTY_CONFIRM_MAX_OBSERVATIONS: u32 = 40;
@@ -99,6 +114,15 @@ pub(crate) struct EventFarmRuntime {
     /// Consecutive `PartyConfirm` observations; the dialog is never
     /// auto-confirmed, so a stuck one stops the run.
     pub(crate) party_confirm_seen: u32,
+    /// Cards behind the current target pick (scan cache or live scan).
+    /// The ▶-tap verification merges a live card read into this list.
+    pub(crate) last_cards: Vec<QuestCard>,
+    /// Last「关闭」tap on an unexpected card, and how many were issued.
+    /// The card's 关闭 sits where the event map's back arrow lives, so a
+    /// second tap fired before the card finishes closing would leave the
+    /// event for the home screen.
+    pub(crate) last_node_close: Option<std::time::Instant>,
+    pub(crate) node_close_taps: u32,
 }
 
 impl EventFarmRuntime {
@@ -112,6 +136,9 @@ impl EventFarmRuntime {
             failures: 0,
             bad_labels: HashMap::new(),
             party_confirm_seen: 0,
+            last_cards: Vec::new(),
+            last_node_close: None,
+            node_close_taps: 0,
         }
     }
 }
@@ -146,6 +173,53 @@ pub(crate) fn pick_target_card(
     best_farm_quest(&candidates)
         .cloned()
         .ok_or_else(|| "扫描结果里没有可打的活动关卡（全部锁定、拉黑或 AP 不足）".into())
+}
+
+/// Whether the card just read from the open quest-detail box differs from
+/// the cached card the planner picked. Only identity fields count — name,
+/// AP and recommended level. `cond` and `label` are bookkeeping, and a
+/// `locked` difference is resolved by re-deciding on the merged list.
+pub(crate) fn cards_differ(cached: &QuestCard, live: &QuestCard) -> bool {
+    cached.name.trim() != live.name.trim()
+        || cached.ap != live.ap
+        || cached.level != live.level
+        || cached.plus != live.plus
+}
+
+/// Replace the cached card opened by `live`'s region label with the live
+/// read (append when the cache has no entry for that label).
+pub(crate) fn merge_card(mut cards: Vec<QuestCard>, live: QuestCard) -> Vec<QuestCard> {
+    if let Some(slot) = cards.iter_mut().find(|card| card.label == live.label) {
+        *slot = live;
+    } else {
+        cards.push(live);
+    }
+    cards
+}
+
+/// Decide the quest to enter from `cards` — the selector's core, shared by
+/// the map pick (`select_event_target`) and the live-card verification.
+pub(crate) fn decide_target(
+    cards: &[QuestCard],
+    target: Option<&str>,
+    points: Option<u32>,
+    bad_labels: &HashMap<String, u32>,
+) -> Result<QuestCard, String> {
+    match target.filter(|t| !t.trim().is_empty()) {
+        Some(target) => pick_target_card(cards, Some(target), bad_labels),
+        None => match plan_once(cards, points, bad_labels)? {
+            EventPlan::Story(card) | EventPlan::Farm(card) => Ok(card),
+        },
+    }
+}
+
+/// Outcome of verifying the pending card against a live read before
+/// tapping ▶.
+pub(crate) enum VerifyOutcome {
+    /// The card matches (or could not be read): tap ▶.
+    Proceed,
+    /// The card is not what the scan cached: close it and pick again.
+    Reselect,
 }
 
 /// Sleep before the next retry after `failures` consecutive quest-entry
@@ -269,13 +343,25 @@ impl Runner {
     }
 
     /// Reward-notice confirmation (～关于宝具强化专用灵基～). The dialog has
-    /// no other interactive element, so 关闭 is the only safe tap.
+    /// no other interactive element, so 关闭 is the only safe tap. The
+    /// button is located by template; the fixed measured coordinate is the
+    /// fallback when the template cannot be matched.
     fn handle_np_ce_notice(&mut self) -> AutomationResult<()> {
         self.emit("NpCeNotice", "宝具强化专用灵基说明弹窗，点击「关闭」");
-        if self.tap_at(
-            "NpCeNotice",
-            Point::new(NP_CE_NOTICE_CLOSE.0, NP_CE_NOTICE_CLOSE.1),
-        ) {
+        let located = self
+            .sidecar()
+            .find_element(
+                None,
+                NP_CE_NOTICE_CLOSE_TEMPLATE,
+                NP_CE_NOTICE_CLOSE_REGION,
+                0.8,
+            )
+            .recoverable()?
+            .ok()
+            .flatten();
+        let point = located
+            .unwrap_or(Point::new(NP_CE_NOTICE_CLOSE.0, NP_CE_NOTICE_CLOSE.1));
+        if self.tap_at("NpCeNotice", point) {
             thread::sleep(ACTION_DELAY);
         }
         Ok(())
@@ -323,6 +409,12 @@ impl Runner {
     }
 
     fn handle_event_map(&mut self) -> AutomationResult<()> {
+        // Back on the map: any previous unexpected-card close episode is
+        // over, so its tap budget starts fresh.
+        if let Some(runtime) = self.event_farm_runtime.as_mut() {
+            runtime.last_node_close = None;
+            runtime.node_close_taps = 0;
+        }
         let phase = self
             .event_farm_runtime
             .as_ref()
@@ -441,6 +533,25 @@ impl Runner {
             .map(|runtime| runtime.phase)
             .unwrap_or(EventFarmPhase::NeedMap);
         if phase == EventFarmPhase::AwaitingNodeDetail {
+            // Verify the open card against the live read before spending
+            // AP on what a stale scan cache picked.
+            match self.verify_pending_card() {
+                Ok(VerifyOutcome::Proceed) => {}
+                Ok(VerifyOutcome::Reselect) => {
+                    self.emit("NodeDetail", "关闭任务卡，回到地图重新选本");
+                    if let Some(runtime) = self.event_farm_runtime.as_mut() {
+                        runtime.phase = EventFarmPhase::NeedMap;
+                        runtime.pending_card = None;
+                    }
+                    if self.tap_at("NodeDetail", Point::new(CARD_CLOSE.0, CARD_CLOSE.1)) {
+                        thread::sleep(ACTION_DELAY);
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    self.emit_warn("NodeDetail", &format!("{error}，按缓存继续"));
+                }
+            }
             self.emit("NodeDetail", "点击 ▶ 进入任务");
             if self.tap_at("NodeDetail", Point::new(NODE_FORWARD.0, NODE_FORWARD.1)) {
                 if let Some(runtime) = self.event_farm_runtime.as_mut() {
@@ -484,10 +595,40 @@ impl Runner {
             return Ok(());
         }
         // The card is open while the flow wants the map — a leftover from
-        // an earlier state or a missed close tap. Tap 关闭 until it goes.
+        // an earlier state or a missed close tap. Tap 关闭, but keep the
+        // taps spaced: after the card closes this same coordinate is the
+        // event map's back arrow, and a rushed second tap exits the event.
+        let (spaced, taps) = self
+            .event_farm_runtime
+            .as_mut()
+            .map(|runtime| {
+                let spaced = runtime
+                    .last_node_close
+                    .map(|at| at.elapsed() >= NODE_CLOSE_MIN_INTERVAL)
+                    .unwrap_or(true);
+                if spaced {
+                    runtime.last_node_close = Some(std::time::Instant::now());
+                    runtime.node_close_taps += 1;
+                }
+                (spaced, runtime.node_close_taps)
+            })
+            .unwrap_or((false, 0));
+        if taps > NODE_CLOSE_MAX {
+            self.fail_action(
+                "NodeDetail",
+                "关闭任务卡",
+                format!("任务卡连续 {taps} 次「关闭」未消失，已停止，请人工查看").into(),
+            );
+            return Ok(());
+        }
+        if !spaced {
+            // The previous close tap may still be animating.
+            thread::sleep(ACTION_DELAY);
+            return Ok(());
+        }
         self.emit_debug("NodeDetail", "任务卡未在等待中，点击「关闭」回到地图");
         if self.tap_at("NodeDetail", Point::new(CARD_CLOSE.0, CARD_CLOSE.1)) {
-            thread::sleep(ACTION_DELAY);
+            thread::sleep(super::scan::TAP_SETTLE);
         }
         Ok(())
     }
@@ -633,25 +774,26 @@ impl Runner {
             })
             .unwrap_or((None, false, HashMap::new()));
         let cards = self.event_scan_cards(rescan)?;
-        let card = match target.as_deref().filter(|t| !t.trim().is_empty()) {
-            Some(target) => pick_target_card(&cards, Some(target), &bad_labels)?,
-            None => match plan_once(&cards, self.read_event_points_live(), &bad_labels)? {
-                EventPlan::Story(card) => {
-                    self.emit(
-                        "EventMap",
-                        &format!("推进主线「{}」", card.name),
-                    );
-                    card
-                }
-                EventPlan::Farm(card) => {
-                    self.emit(
-                        "EventMap",
-                        &format!("刷活动点数：「{}」等级{}", card.name, card.level_text()),
-                    );
-                    card
-                }
-            },
+        if let Some(runtime) = self.event_farm_runtime.as_mut() {
+            runtime.last_cards = cards.clone();
+        }
+        let explicit = target.as_deref().filter(|t| !t.trim().is_empty());
+        // Points only matter for the automatic plan; skip the OCR read
+        // when an explicit target makes the plan irrelevant.
+        let points = if explicit.is_none() {
+            self.read_event_points_live()
+        } else {
+            None
         };
+        let card = decide_target(&cards, explicit, points, &bad_labels)?;
+        if card.is_story() {
+            self.emit("EventMap", &format!("推进主线「{}」", card.name));
+        } else {
+            self.emit(
+                "EventMap",
+                &format!("刷活动点数：「{}」等级{}", card.name, card.level_text()),
+            );
+        }
         if let Some(runtime) = self.event_farm_runtime.as_mut() {
             runtime.rescan_needed = false;
         }
@@ -667,6 +809,102 @@ impl Runner {
             Err(error) => {
                 self.emit_warn("EventMap", &format!("读取活动点数失败，按 0 处理: {error}"));
                 None
+            }
+        }
+    }
+
+    /// Before tapping ▶, read the open quest card and compare it with the
+    /// card the planner picked from the scan cache. A stale cache (quests
+    /// first-cleared since the last scan) would otherwise send the runner
+    /// into a card that no longer offers ▶. The live read replaces the
+    /// cached entry and the plan re-decides; a changed target closes the
+    /// card for a fresh pick. Best-effort: a failed read proceeds with the
+    /// cached pick, which is no worse than running without the check.
+    fn verify_pending_card(&mut self) -> Result<VerifyOutcome, String> {
+        let Some(pending) = self
+            .event_farm_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.pending_card.clone())
+        else {
+            return Ok(VerifyOutcome::Proceed);
+        };
+        if self
+            .event_farm_runtime
+            .as_ref()
+            .is_none_or(|runtime| runtime.last_cards.is_empty())
+        {
+            return Ok(VerifyOutcome::Proceed);
+        }
+        let result = self
+            .sidecar()
+            .read_quest_card(None)
+            .map_err(|error| format!("任务卡实读失败: {error}"))?;
+        if !result.found {
+            // Cards fade in; an unreadable frame is not proof of a mismatch.
+            return Ok(VerifyOutcome::Proceed);
+        }
+        let live = QuestCard::from_result(result, pending.label.clone());
+        if !cards_differ(&pending, &live) {
+            return Ok(VerifyOutcome::Proceed);
+        }
+        self.emit_warn(
+            "NodeDetail",
+            &format!(
+                "任务卡实读为「{}」等级{} AP{}，与缓存「{}」不一致",
+                live.name,
+                live.level_text(),
+                live.ap,
+                pending.name
+            ),
+        );
+        let (target, bad_labels) = self
+            .event_farm_runtime
+            .as_ref()
+            .map(|runtime| {
+                (
+                    runtime.config.target_quest.clone(),
+                    runtime.bad_labels.clone(),
+                )
+            })
+            .unwrap_or((None, HashMap::new()));
+        let merged = merge_card(
+            self.event_farm_runtime
+                .as_ref()
+                .map(|runtime| runtime.last_cards.clone())
+                .unwrap_or_default(),
+            live,
+        );
+        if let Some(path) = self.scan_cache_path() {
+            if let Err(error) = save_cache(&path, merged.clone()) {
+                self.emit_warn("NodeDetail", &format!("写入扫图缓存失败: {error}"));
+            }
+        }
+        let attempts = self
+            .event_farm_runtime
+            .as_mut()
+            .map(|runtime| {
+                runtime.last_cards = merged.clone();
+                runtime.label_attempts += 1;
+                runtime.label_attempts
+            })
+            .unwrap_or(0);
+        if attempts > MAX_CARD_ATTEMPTS {
+            self.blacklist_pending_label("NodeDetail", "任务卡与缓存反复不一致");
+            self.apply_backoff("NodeDetail");
+            return Ok(VerifyOutcome::Reselect);
+        }
+        let points = self.read_event_points_live();
+        match decide_target(&merged, target.as_deref(), points, &bad_labels) {
+            Ok(decided) if decided.label == pending.label => {
+                if let Some(runtime) = self.event_farm_runtime.as_mut() {
+                    runtime.pending_card = Some(decided);
+                }
+                Ok(VerifyOutcome::Proceed)
+            }
+            Ok(_) => Ok(VerifyOutcome::Reselect),
+            Err(error) => {
+                self.fail_action("NodeDetail", "校验任务卡后重新决策", error);
+                Ok(VerifyOutcome::Reselect)
             }
         }
     }
@@ -791,6 +1029,69 @@ mod tests {
             assert_eq!(backoff_seconds(failures as u32), *seconds);
         }
         assert_eq!(backoff_seconds(50), 60);
+    }
+
+    #[test]
+    fn cards_differ_only_on_identity_fields() {
+        let cached = card("小镇的执念", 90, 2, 40, false, "小镇");
+        let mut live = cached.clone();
+        assert!(!cards_differ(&cached, &live));
+
+        // The quest at this label changed since the scan: mismatch.
+        live = card("新解锁的主线", 10, 0, 5, false, "小镇");
+        assert!(cards_differ(&cached, &live));
+
+        // Same quest, different AP or level: mismatch.
+        live = card("小镇的执念", 90, 2, 35, false, "小镇");
+        assert!(cards_differ(&cached, &live));
+        live = card("小镇的执念", 85, 2, 40, false, "小镇");
+        assert!(cards_differ(&cached, &live));
+
+        // Bookkeeping fields never decide a mismatch.
+        let mut live = card(" 小镇的执念 ", 90, 2, 40, true, "别的标签");
+        live.cond = "点数达100以上".into();
+        assert!(!cards_differ(&cached, &live));
+    }
+
+    #[test]
+    fn merge_card_replaces_by_label_and_keeps_the_rest() {
+        let cards = vec![card("旧的", 90, 0, 40, false, "小镇"), card("另一本", 80, 0, 30, false, "港口")];
+        let merged = merge_card(cards, card("实读", 70, 1, 40, false, "小镇"));
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].name, "实读");
+        assert_eq!(merged[1].name, "另一本");
+
+        let merged = merge_card(merged, card("新标签", 60, 0, 40, false, "山丘"));
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[2].name, "新标签");
+    }
+
+    #[test]
+    fn decide_target_follows_the_explicit_target_first() {
+        let cards = [card("剧情", 10, 0, 5, false, "a"), card("刷点本", 90, 1, 40, false, "b")];
+        let picked = decide_target(&cards, Some("刷点本"), Some(0), &HashMap::new()).unwrap();
+        assert_eq!(picked.name, "刷点本");
+    }
+
+    #[test]
+    fn decide_target_auto_plan_prefers_unlocked_story() {
+        let cards = [
+            card("剧情", 10, 0, 5, false, "a"),
+            card("刷点本", 90, 1, 40, false, "b"),
+        ];
+        let picked = decide_target(&cards, None, Some(999_999), &HashMap::new()).unwrap();
+        assert_eq!(picked.name, "剧情");
+
+        // With story finished (no story cards left) the plan grinds.
+        let cards = [card("刷点本", 90, 1, 40, false, "b")];
+        let picked = decide_target(&cards, None, Some(999_999), &HashMap::new()).unwrap();
+        assert_eq!(picked.name, "刷点本");
+    }
+
+    #[test]
+    fn decide_target_errors_when_nothing_is_usable() {
+        let cards = [card("刷点本", 90, 1, 40, true, "b")];
+        assert!(decide_target(&cards, None, Some(0), &HashMap::new()).is_err());
     }
 
     #[test]
