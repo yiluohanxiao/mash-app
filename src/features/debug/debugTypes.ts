@@ -10,6 +10,25 @@ export interface DebugCaptureResult {
   screenSize: DebugScreenSize | null;
 }
 
+export interface EventQuestCardDto {
+  name: string;
+  level: number;
+  plus: number;
+  ap: number;
+  locked: boolean;
+  cond: string;
+  label: string;
+}
+
+export interface DebugEventScanResultDto {
+  labels: string[];
+  cards: EventQuestCardDto[];
+  points: number | null;
+  best: EventQuestCardDto | null;
+  cached: boolean;
+  screenSize: DebugScreenSize;
+}
+
 export interface DebugStreamStatusDto {
   connected: boolean;
   screenSize: DebugScreenSize | null;

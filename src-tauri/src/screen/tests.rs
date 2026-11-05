@@ -198,3 +198,40 @@ fn loot_event_screen_routes_to_loot_handler() {
         Screen::BattleResultLoot
     );
 }
+
+#[test]
+fn event_screens_round_trip_display_name() {
+    for (screen, label) in [
+        (Screen::EventMap, "EventMap"),
+        (Screen::Terminal, "Terminal"),
+        (Screen::NodeDetail, "NodeDetail"),
+        (Screen::QuestConfirm, "QuestConfirm"),
+        (Screen::Story, "Story"),
+        (Screen::SkipConfirm, "SkipConfirm"),
+        (Screen::TapContinue, "TapContinue"),
+        (Screen::Loading, "Loading"),
+        (Screen::Title, "Title"),
+        (Screen::Defeat, "Defeat"),
+        (Screen::Busy, "Busy"),
+        (Screen::Cg, "Cg"),
+        (Screen::RewardSelect, "RewardSelect"),
+        (Screen::RewardPage, "RewardPage"),
+        (Screen::ServantFull, "ServantFull"),
+        (Screen::Gate, "Gate"),
+        (Screen::Tip, "Tip"),
+        (Screen::PartyConfirm, "PartyConfirm"),
+        (Screen::RepeatConfirm, "RepeatConfirm"),
+        (Screen::ListUpdate, "ListUpdate"),
+    ] {
+        assert_eq!(screen.to_string(), label);
+        assert_eq!(label.parse::<Screen>().unwrap(), screen);
+    }
+}
+
+#[test]
+fn event_detection_scope_is_disjoint_and_parses() {
+    for label in EVENT_ONLY_DETECTION_SCREENS {
+        assert!(!BATTLE_DETECTION_SCREENS.contains(label), "{label}");
+        assert_ne!(label.parse::<Screen>().unwrap(), Screen::Unknown, "{label}");
+    }
+}

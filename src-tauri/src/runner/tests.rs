@@ -1555,6 +1555,109 @@ fn battle_flow_runs_full_attack_cycle_through_explicit_states() {
 }
 
 #[test]
+fn attack_animation_skip_requires_a_successful_submission_and_one_second_between_taps() {
+    let mut battle = BattleState::new();
+    let at = Instant::now();
+    assert!(!battle.attack_animation_skip_due(Screen::Unknown, false, at));
+    assert!(
+        !battle
+            .transition(BattleFlowEvent::AttackCardsSubmitted { at })
+            .accepted
+    );
+    assert!(!battle.attack_animation_skip_due(Screen::Battle, false, at + Duration::from_secs(2)));
+
+    battle.transition(BattleFlowEvent::AttackScreenDetected);
+    battle.transition(BattleFlowEvent::AttackCardsSubmitted { at });
+    for (millis, screen, due) in [
+        (999, Screen::Battle, false),
+        (1000, Screen::Battle, true),
+        (1500, Screen::Unknown, false),
+        (2000, Screen::Unknown, true),
+        (5000, Screen::Battle, true),
+        (5000, Screen::Battle, false),
+        (5999, Screen::Unknown, false),
+        (6000, Screen::Unknown, true),
+    ] {
+        assert_eq!(
+            battle.attack_animation_skip_due(screen, false, at + Duration::from_millis(millis)),
+            due,
+            "at {millis} ms on {screen:?}"
+        );
+    }
+}
+
+#[test]
+fn attack_animation_skip_stops_when_actionable_even_before_hud_is_readable() {
+    let at = Instant::now();
+    let mut battle = BattleState::new();
+    battle.transition(BattleFlowEvent::AttackScreenDetected);
+    battle.transition(BattleFlowEvent::AttackCardsSubmitted { at });
+    assert!(!battle.attack_animation_skip_due(Screen::Battle, true, at + Duration::from_secs(1)));
+    // Turn progression still waits for the HUD; skips must already be disabled.
+    assert!(battle.awaiting_attack_resolution());
+    assert!(!battle.attack_animation_skip_due(Screen::Unknown, false, at + Duration::from_secs(2)));
+    battle.transition(BattleFlowEvent::PostAttackHudWaitStarted { at });
+    assert!(!battle.attack_animation_skip_due(Screen::Battle, false, at + Duration::from_secs(3)));
+}
+
+#[test]
+fn attack_animation_skip_stays_disabled_after_another_page_until_next_submission() {
+    let at = Instant::now();
+    for screen in [
+        Screen::BattleResultBond,
+        Screen::BattleResultExp,
+        Screen::BattleResultLoot,
+        Screen::BattleResultFriendRequest,
+        Screen::BattleResultContinue,
+        Screen::SupportSelect,
+        Screen::TeamConfirm,
+        Screen::TeamChange,
+        Screen::ServantSelect,
+        Screen::RankUpQuest,
+        Screen::APRecovery,
+    ] {
+        let mut battle = BattleState::new();
+        battle.transition(BattleFlowEvent::AttackScreenDetected);
+        battle.transition(BattleFlowEvent::AttackCardsSubmitted { at });
+        assert!(!battle.attack_animation_skip_due(screen, false, at + Duration::from_secs(1)));
+        assert!(!battle.attack_animation_skip_due(
+            Screen::Unknown,
+            false,
+            at + Duration::from_secs(2)
+        ));
+        assert!(!battle.attack_animation_skip_due(
+            Screen::Battle,
+            false,
+            at + Duration::from_secs(3)
+        ));
+
+        battle.transition(BattleFlowEvent::PostAttackHudResolved);
+        battle.transition(BattleFlowEvent::AttackScreenDetected);
+        let next_at = at + Duration::from_secs(4);
+        battle.transition(BattleFlowEvent::AttackCardsSubmitted { at: next_at });
+        assert!(!battle.attack_animation_skip_due(Screen::Battle, false, next_at));
+        assert!(battle.attack_animation_skip_due(
+            Screen::Unknown,
+            false,
+            next_at + Duration::from_secs(1)
+        ));
+    }
+}
+
+#[test]
+fn attack_animation_skip_preserves_lingering_card_screen_recovery() {
+    let at = Instant::now();
+    let mut battle = BattleState::new();
+    battle.transition(BattleFlowEvent::AttackScreenDetected);
+    battle.transition(BattleFlowEvent::AttackCardsSubmitted { at });
+    assert!(!battle.attack_animation_skip_due(Screen::Attack, false, at + Duration::from_secs(1)));
+    assert_eq!(battle.attack_submission_started_at(), Some(at));
+    assert!(battle.attack_animation_skip_due(Screen::Battle, false, at + Duration::from_secs(2)));
+    battle.transition(BattleFlowEvent::BattleActionable);
+    assert!(!battle.attack_animation_skip_due(Screen::Unknown, false, at + Duration::from_secs(3)));
+}
+
+#[test]
 fn battle_load_ignores_setup_frames_during_start_grace_period() {
     let mut battle = BattleState::new();
     let at = Instant::now();
@@ -6300,6 +6403,51 @@ fn ap_recovery_limits_report_no_candidate_after_every_cap_is_reached() {
 }
 
 #[test]
+fn event_mode_never_offers_premium_items_and_caps_apples() {
+    let limits = event_mode_ap_recovery_limits(ApRecoveryLimits {
+        gold: Some(99),
+        rainbow: Some(99),
+        silver: None,
+        bronze: Some(3),
+        copper: Some(20),
+        ..Default::default()
+    });
+    assert_eq!(limits.gold, Some(0));
+    assert_eq!(limits.rainbow, Some(0));
+    assert_eq!(limits.silver, Some(EVENT_APPLE_LIMIT));
+    assert_eq!(limits.bronze, Some(3));
+    assert_eq!(limits.copper, Some(EVENT_APPLE_LIMIT));
+
+    // Configured silver above the cap is clamped, not honored.
+    let limits = event_mode_ap_recovery_limits(ApRecoveryLimits {
+        silver: Some(50),
+        ..Default::default()
+    });
+    assert_eq!(limits.silver, Some(EVENT_APPLE_LIMIT));
+}
+
+#[test]
+fn event_mode_stops_once_every_allowed_apple_is_exhausted() {
+    let limits = event_mode_ap_recovery_limits(ApRecoveryLimits::default());
+    let usage = BattleRunApRecoveryUsage {
+        silver: EVENT_APPLE_LIMIT,
+        bronze: EVENT_APPLE_LIMIT,
+        copper: EVENT_APPLE_LIMIT,
+        ..Default::default()
+    };
+    assert!(available_ap_recovery_items(&EVENT_AP_RECOVERY_ITEMS, limits, &usage).is_empty());
+
+    let usage = BattleRunApRecoveryUsage {
+        silver: EVENT_APPLE_LIMIT - 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        available_ap_recovery_items(&EVENT_AP_RECOVERY_ITEMS, limits, &usage),
+        vec![ApRecoveryItem::Silver, ApRecoveryItem::Bronze, ApRecoveryItem::Copper]
+    );
+}
+
+#[test]
 fn ap_recovery_waits_half_a_second_between_item_and_confirmation_steps() {
     assert_eq!(AP_RECOVERY_TAP_SETTLE, Duration::from_millis(500));
 }
@@ -7120,6 +7268,18 @@ fn format_scroll_debug_lists_sorted_anchor_positions() {
     assert!(msg.contains("n=3"));
     assert!(msg.contains("swipe=0.78→0.28"));
     assert!(msg.contains("(588ms+400ms settle)"));
+}
+
+#[test]
+fn support_scroll_preserves_adb_wait_and_only_shortens_streamed_input() {
+    assert_eq!(
+        support_scroll_redraw_wait(crate::touch::TouchTiming::CommandBased),
+        Duration::from_millis(450)
+    );
+    assert_eq!(
+        support_scroll_redraw_wait(crate::touch::TouchTiming::Streamed),
+        Duration::from_millis(150)
+    );
 }
 
 #[test]

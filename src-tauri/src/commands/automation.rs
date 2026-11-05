@@ -259,7 +259,14 @@ pub(crate) fn start_automation(
     coordinator: tauri::State<'_, DeviceOperationCoordinator>,
     debug_state: tauri::State<'_, debug::DebugSidecar>,
 ) -> Result<(), String> {
-    start_automation_with_config(&app, config, &handle_state, &coordinator, &debug_state)
+    start_automation_with_config(
+        &app,
+        config,
+        AutomationKind::Battle,
+        &handle_state,
+        &coordinator,
+        &debug_state,
+    )
 }
 
 #[tauri::command]
@@ -277,18 +284,48 @@ pub(crate) fn start_rank_up_quest_automation(
         return Err("强化任务自动化首版仅支持国服".into());
     }
     apply_rank_up_quest_workflow(&mut config, workflow, &capture_state)?;
-    start_automation_with_config(&app, config, &handle_state, &coordinator, &debug_state)
+    start_automation_with_config(
+        &app,
+        config,
+        AutomationKind::Battle,
+        &handle_state,
+        &coordinator,
+        &debug_state,
+    )
+}
+
+#[tauri::command]
+pub(crate) fn start_event_farm_automation(
+    app: tauri::AppHandle,
+    mut config: RunConfig,
+    handle_state: tauri::State<'_, Mutex<RunnerHandle>>,
+    coordinator: tauri::State<'_, DeviceOperationCoordinator>,
+    debug_state: tauri::State<'_, debug::DebugSidecar>,
+) -> Result<(), String> {
+    let server = *app.state::<Mutex<Server>>().lock().unwrap();
+    if server != Server::Cn {
+        return Err("活动自动刷本首版仅支持国服".into());
+    }
+    config.event_farm = Some(config.event_farm.unwrap_or_default());
+    start_automation_with_config(
+        &app,
+        config,
+        AutomationKind::EventFarm,
+        &handle_state,
+        &coordinator,
+        &debug_state,
+    )
 }
 
 fn start_automation_with_config(
     app: &tauri::AppHandle,
     mut config: RunConfig,
+    kind: AutomationKind,
     handle_state: &Mutex<RunnerHandle>,
     coordinator: &DeviceOperationCoordinator,
     debug_state: &debug::DebugSidecar,
 ) -> Result<(), String> {
-    let automation_lease =
-        coordinator.reserve(DeviceOperation::Automation(AutomationKind::Battle))?;
+    let automation_lease = coordinator.reserve(DeviceOperation::Automation(kind))?;
 
     let project = read_projects(app)?
         .into_iter()

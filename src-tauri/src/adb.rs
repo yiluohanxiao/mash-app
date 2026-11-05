@@ -99,6 +99,22 @@ impl Adb {
         }
     }
 
+    /// Build an Adb from an explicit executable path without any managed
+    /// app state (default emulator lookup settings). Used by the headless
+    /// event harness, which runs without the GUI app.
+    pub fn with_path(adb_path: PathBuf, selected_serial: Option<String>) -> Self {
+        Self {
+            adb_path,
+            device: None,
+            selected_serial,
+            display_id: 0,
+            mumu_lookup: std::sync::Arc::new(std::sync::Mutex::new(())),
+            emulator_selection: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::commands::emulator::EmulatorSettings::default(),
+            )),
+        }
+    }
+
     /// Serial of the connected device (populated after `connect`).
     pub fn serial(&self) -> Option<&str> {
         self.device.as_deref()
@@ -513,6 +529,162 @@ impl Adb {
 
         Ok(())
     }
+
+    /// Two-finger pinch via Linux multi-touch (MT protocol B) samples.
+    ///
+    /// `input` has no two-contact gesture, so this writes raw
+    /// `sendevent` slot samples to the touchscreen device. It is the
+    /// fallback for when the scrcpy control channel is unavailable, and
+    /// assumes the emulator's default panel: a portrait 1080×1920
+    /// touchscreen in landscape rotation 1, where display `(x, y)` maps
+    /// to native `(panel_short - y, x)`. A panel with a different short
+    /// side needs `MASH_TOUCH_DEVICE` plus a matching mapping, so this
+    /// path intentionally reports an error rather than guessing.
+    pub fn pinch(
+        &self,
+        center: (u32, u32),
+        from_gap: u32,
+        to_gap: u32,
+        duration_ms: u32,
+        screen: (u32, u32),
+    ) -> Result<(), String> {
+        let device = touch_device_path()?;
+        let script = build_pinch_script(center, from_gap, to_gap, duration_ms, screen, &device)?;
+        let mut args = self.base_args();
+        args.extend(["shell".into(), script]);
+
+        let output = adb_command(&self.adb_path)
+            .args(&args)
+            .output()
+            .map_err(|e| format!("adb pinch failed: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "adb pinch exited with: {} ({stderr})",
+                output.status
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+/// Default MuMu touchscreen node used by the multi-touch fallback.
+const DEFAULT_TOUCH_DEVICE: &str = "/dev/input/event4";
+
+/// Cap on pinch motion samples so a long gesture cannot overflow the
+/// `adb shell` command line or the device's event buffer.
+const PINCH_MAX_STEPS: u32 = 60;
+
+fn touch_device_path() -> Result<String, String> {
+    let path = std::env::var("MASH_TOUCH_DEVICE")
+        .unwrap_or_else(|_| DEFAULT_TOUCH_DEVICE.to_string());
+    validate_touch_device(&path)
+}
+
+/// The device path is interpolated into a shell script, so only accept
+/// characters that appear in a real `/dev/input/eventN` path.
+fn validate_touch_device(path: &str) -> Result<String, String> {
+    if path.is_empty()
+        || !path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.'))
+    {
+        return Err(format!("invalid touch device path: {path}"));
+    }
+    Ok(path.to_string())
+}
+
+/// Build the MT protocol B script for a two-finger pinch.
+///
+/// Extracted as a pure function so the slot/tracking-id shape and the
+/// rotation-1 coordinate mapping can be asserted without a device.
+fn build_pinch_script(
+    center: (u32, u32),
+    from_gap: u32,
+    to_gap: u32,
+    duration_ms: u32,
+    screen: (u32, u32),
+    device: &str,
+) -> Result<String, String> {
+    if screen.0 < 2 || screen.1 < 2 {
+        return Err("adb pinch requires a display of at least 2x2".into());
+    }
+    if !(1..=60_000).contains(&duration_ms) {
+        return Err("adb pinch duration must be 1..=60000 ms".into());
+    }
+    let cx = center.0.min(screen.0 - 1);
+    let cy = center.1.min(screen.1 - 1);
+    let max_gap = cx.min(screen.0 - 1 - cx) * 2;
+    if max_gap == 0 {
+        return Err("adb pinch center is too close to the display edge".into());
+    }
+    let from_gap = from_gap.min(max_gap);
+    let to_gap = to_gap.min(max_gap);
+    if from_gap == 0 {
+        return Err("adb pinch needs a nonzero starting gap".into());
+    }
+
+    // Landscape rotation 1: display x runs down the portrait panel and
+    // display y runs back across it (matches fgo-auto's touch.py).
+    let native = |point: (u32, u32)| {
+        let x = i64::from(point.0.min(screen.0 - 1));
+        let y = i64::from(point.1.min(screen.1 - 1));
+        (i64::from(screen.1) - y, x)
+    };
+    let fingers = |gap: u32| {
+        let half = gap / 2;
+        (native((cx - half, cy)), native((cx + (gap - half), cy)))
+    };
+
+    let mut commands = vec![
+        format!("sendevent {device} 3 47 0"),
+        format!("sendevent {device} 3 57 11"),
+    ];
+    let (left, right) = fingers(from_gap);
+    commands.extend([
+        format!("sendevent {device} 3 53 {}", left.0),
+        format!("sendevent {device} 3 54 {}", left.1),
+        format!("sendevent {device} 3 47 1"),
+        format!("sendevent {device} 3 57 12"),
+        format!("sendevent {device} 3 53 {}", right.0),
+        format!("sendevent {device} 3 54 {}", right.1),
+        format!("sendevent {device} 1 330 1"),
+        format!("sendevent {device} 0 0 0"),
+    ]);
+
+    let steps = duration_ms.div_ceil(16).clamp(2, PINCH_MAX_STEPS);
+    let step_sleep_s = (duration_ms as f64 / steps as f64) / 1000.0;
+    commands.push(format!("sleep {step_sleep_s:.3}"));
+    for step in 1..=steps {
+        let progress = f64::from(step) / f64::from(steps);
+        let gap = (f64::from(from_gap)
+            + (f64::from(to_gap) - f64::from(from_gap)) * progress)
+            .round() as u32;
+        let (left, right) = fingers(gap.min(max_gap));
+        commands.extend([
+            format!("sendevent {device} 3 47 0"),
+            format!("sendevent {device} 3 53 {}", left.0),
+            format!("sendevent {device} 3 54 {}", left.1),
+            format!("sendevent {device} 3 47 1"),
+            format!("sendevent {device} 3 53 {}", right.0),
+            format!("sendevent {device} 3 54 {}", right.1),
+            format!("sendevent {device} 0 0 0"),
+        ]);
+        if step < steps {
+            commands.push(format!("sleep {step_sleep_s:.3}"));
+        }
+    }
+
+    commands.extend([
+        format!("sendevent {device} 3 47 0"),
+        format!("sendevent {device} 3 57 -1"),
+        format!("sendevent {device} 3 47 1"),
+        format!("sendevent {device} 3 57 -1"),
+        format!("sendevent {device} 1 330 0"),
+        format!("sendevent {device} 0 0 0"),
+    ]);
+    Ok(commands.join("; "))
 }
 
 /// Target wall-clock interval between adjacent MOVE events during the
@@ -653,6 +825,63 @@ mod tests {
             ),
         ] {
             assert_eq!(Adb::parse_screen_size(output), Some(expected));
+        }
+    }
+
+    #[test]
+    fn pinch_script_uses_mt_b_slots_and_rotation_one_native_coordinates() {
+        let script =
+            build_pinch_script((960, 540), 300, 60, 320, (1920, 1080), "/dev/input/event4")
+                .unwrap();
+
+        // Two fingers get distinct tracking ids on separate slots.
+        assert!(script.contains("sendevent /dev/input/event4 3 57 11"));
+        assert!(script.contains("sendevent /dev/input/event4 3 57 12"));
+        // Display (810, 540) -> native (1080-540, 810).
+        assert!(script.contains(
+            "sendevent /dev/input/event4 3 53 540; sendevent /dev/input/event4 3 54 810"
+        ));
+        // Display (1110, 540) -> native (540, 1110).
+        assert!(script.contains(
+            "sendevent /dev/input/event4 3 53 540; sendevent /dev/input/event4 3 54 1110"
+        ));
+        assert!(script.contains("sendevent /dev/input/event4 1 330 1"));
+        assert!(script.contains("sendevent /dev/input/event4 1 330 0"));
+        assert!(script.ends_with(
+            "sendevent /dev/input/event4 3 57 -1; \
+             sendevent /dev/input/event4 3 47 1; \
+             sendevent /dev/input/event4 3 57 -1; \
+             sendevent /dev/input/event4 1 330 0; \
+             sendevent /dev/input/event4 0 0 0"
+        ));
+        assert!(script.matches("sleep ").count() >= 2);
+    }
+
+    #[test]
+    fn pinch_script_clamps_to_the_display_and_rejects_impossible_geometry() {
+        let script = build_pinch_script((50, 540), 300, 60, 200, (1920, 1080), "/dev/input/x")
+            .unwrap();
+        // Clamped 100 px gap: contacts at display x=0 and x=100.
+        assert!(script.contains("sendevent /dev/input/x 3 53 540; sendevent /dev/input/x 3 54 0"));
+        assert!(script
+            .contains("sendevent /dev/input/x 3 53 540; sendevent /dev/input/x 3 54 100"));
+
+        assert!(build_pinch_script((0, 540), 300, 60, 200, (1920, 1080), "/dev/x").is_err());
+        assert!(build_pinch_script((960, 540), 0, 60, 200, (1920, 1080), "/dev/x").is_err());
+        assert!(build_pinch_script((960, 540), 300, 60, 0, (1920, 1080), "/dev/x").is_err());
+        assert!(build_pinch_script((960, 540), 300, 60, 60_001, (1920, 1080), "/dev/x").is_err());
+        assert!(build_pinch_script((960, 540), 300, 60, 200, (1, 1), "/dev/x").is_err());
+    }
+
+    #[test]
+    fn touch_device_override_rejects_shell_metacharacters() {
+        assert_eq!(validate_touch_device("/dev/input/event4").unwrap(), "/dev/input/event4");
+        assert_eq!(
+            validate_touch_device("/dev/input/event4-1_2.3").unwrap(),
+            "/dev/input/event4-1_2.3"
+        );
+        for invalid in ["", "/dev/input/event4; rm -rf /", "$(id)", "event 4"] {
+            assert!(validate_touch_device(invalid).is_err(), "{invalid}");
         }
     }
 

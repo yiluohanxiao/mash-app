@@ -155,8 +155,37 @@ pub(crate) fn available_ap_recovery_items(
         .collect()
 }
 
+/// Event mode never spends premium items (金/彩/圣晶石一律禁止). The fixed
+/// order is 银 → 青铜 → 赤铜, each capped at `EVENT_APPLE_LIMIT`; the user
+/// config may only lower a cap, never raise it.
+pub(crate) const EVENT_AP_RECOVERY_ITEMS: [ApRecoveryItem; 3] = [
+    ApRecoveryItem::Silver,
+    ApRecoveryItem::Bronze,
+    ApRecoveryItem::Copper,
+];
+pub(crate) const EVENT_APPLE_LIMIT: u32 = 10;
+
+/// Zero out premium items and clamp the apple caps for event mode.
+pub(crate) fn event_mode_ap_recovery_limits(config: ApRecoveryLimits) -> ApRecoveryLimits {
+    let capped = |limit: Option<u32>| limit.unwrap_or(EVENT_APPLE_LIMIT).min(EVENT_APPLE_LIMIT);
+    ApRecoveryLimits {
+        rainbow: Some(0),
+        gold: Some(0),
+        silver: Some(capped(config.silver)),
+        bronze: Some(capped(config.bronze)),
+        copper: Some(capped(config.copper)),
+    }
+}
+
 impl Runner {
     pub(crate) fn available_ap_recovery_items(&self) -> Vec<ApRecoveryItem> {
+        if self.event_farm_active() {
+            return available_ap_recovery_items(
+                &EVENT_AP_RECOVERY_ITEMS,
+                event_mode_ap_recovery_limits(self.config.ap_recovery_limits),
+                &self.ap_recovery_usage,
+            );
+        }
         available_ap_recovery_items(
             &self.config.ap_recovery_items,
             self.config.ap_recovery_limits,

@@ -9,6 +9,8 @@ mod config;
 mod coords;
 mod diagnostics;
 mod engine;
+mod event;
+pub(crate) use event::*;
 mod fault_injection;
 mod grand;
 mod party;
@@ -116,6 +118,10 @@ pub struct Runner {
     sidecar_cache: Option<Arc<Mutex<Option<SidecarClient>>>>,
     config: RunConfig,
     rank_up_quest: Option<RankUpQuestRuntime>,
+    /// Event-farm mode. `Some` makes the main loop route the event-map
+    /// screens through `runner/event/farm.rs` before the battle handlers
+    /// take over at SupportSelect.
+    event_farm_runtime: Option<EventFarmRuntime>,
     scenes: Vec<BattleScene>,
     advanced_mode: bool,
     advanced_scenes: Vec<AdvancedBattleScene>,
@@ -199,9 +205,8 @@ pub struct Runner {
     battle_result_friend_request_handled: bool,
     battle_result_continue_handled: bool,
     /// Pluggable touch-injection backend (see `touch::TouchBackend`).
-    /// Currently always `adb-input`; the trait indirection is kept so
-    /// faster transports can be added later without changing the
-    /// runner's call sites. The runner just calls `tap` / `swipe` /
+    /// Chooses scrcpy when available, otherwise ADB Input.
+    /// The runner just calls `tap` / `swipe` /
     /// `swipe_with_settle` against the trait.
     touch: Box<dyn TouchBackend>,
     diagnostic_adb: Adb,
@@ -233,8 +238,9 @@ impl Runner {
     ) -> Self {
         let (screen_w, screen_h) = screen_size.unwrap_or((DEFAULT_W, DEFAULT_H));
         let (frame_w, frame_h) = frame_size.unwrap_or((DEFAULT_FRAME_W, DEFAULT_FRAME_H));
-        let touch = touch::build(&adb, &app_handle, (screen_w, screen_h));
+        let touch = touch::build(&adb, &sidecar, &app_handle, (screen_w, screen_h));
         let rank_up_quest = config.rank_up_quest.clone().map(RankUpQuestRuntime::new);
+        let event_farm_runtime = config.event_farm.clone().map(EventFarmRuntime::new);
         Self {
             diagnostic_adb: adb,
             touch,
@@ -242,6 +248,7 @@ impl Runner {
             sidecar_cache,
             config,
             rank_up_quest,
+            event_farm_runtime,
             scenes,
             advanced_mode,
             advanced_scenes,

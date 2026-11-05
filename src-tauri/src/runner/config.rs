@@ -146,12 +146,29 @@ pub struct BattleRunProgressEvent {
     pub ap_recovery_usage: BattleRunApRecoveryUsage,
 }
 
+/// Event-farm mode configuration (M2: pick a quest on the event map and
+/// enter it; the battle engine takes over from SupportSelect onward).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventFarmConfig {
+    /// Quest name to farm, matched against the scanned card names.
+    /// `None` farms the highest-level unlocked farm quest (reference
+    /// `plan_once` without a target).
+    #[serde(default)]
+    pub target_quest: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunConfig {
     pub project_id: String,
     #[serde(skip)]
     pub rank_up_quest: Option<RankUpQuestWorkflowConfig>,
+    /// Event-farm mode. `None` runs the ordinary battle loop; `Some`
+    /// makes the same runner navigate the event map first. Injected by
+    /// the event-farm start command rather than typed by the frontend.
+    #[serde(default)]
+    pub event_farm: Option<EventFarmConfig>,
     /// Mystic Code selected for this team. When present, TeamConfirm checks
     /// the outfit icon in the lower-left corner before starting the quest.
     #[serde(default)]

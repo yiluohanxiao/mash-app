@@ -3900,3 +3900,100 @@ fn project_support_class_filter_modes_round_trip_and_default_legacy_projects() {
     )
     .is_err());
 }
+
+#[test]
+fn cn_cv_defines_event_screen_probes_in_safety_order() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let config_path = manifest_dir.join("resources").join("servers").join("cn").join("cv.json");
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    let screens = &config["screens"];
+
+    let priority = |name: &str| -> i64 {
+        screens[name]["detect"]["priority"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("{name} must define detect.priority"))
+    };
+
+    for name in [
+        "EventMap",
+        "Terminal",
+        "NodeDetail",
+        "QuestConfirm",
+        "Story",
+        "SkipConfirm",
+        "TapContinue",
+        "Loading",
+        "Title",
+        "Defeat",
+        "Busy",
+        "RewardSelect",
+        "RewardPage",
+        "ServantFull",
+        "Gate",
+        "Tip",
+        "PartyConfirm",
+        "RepeatConfirm",
+        "ListUpdate",
+    ] {
+        assert!(
+            screens[name]["variants"]["main"].is_object(),
+            "{name} must define variants.main"
+        );
+        assert!(priority(name) > 0, "{name} must define a positive priority");
+    }
+    assert!(screens["Cg"]["variants"]["main"].is_object());
+    assert!(
+        screens["Cg"]["detect"].is_null(),
+        "Cg has no readable text and must stay undetected"
+    );
+
+    // Priority is the safety contract: defeat outranks every settlement
+    // frame, and the map/terminal probes outrank the generic card probe.
+    let order = [
+        "Defeat",
+        "ServantFull",
+        "RewardSelect",
+        "Title",
+        "Gate",
+        "EventMap",
+        "Terminal",
+        "QuestConfirm",
+        "Tip",
+        "SkipConfirm",
+        "Story",
+        "PartyConfirm",
+        "ListUpdate",
+        "RepeatConfirm",
+        "RewardPage",
+        "TapContinue",
+        "NodeDetail",
+        "Loading",
+        "Busy",
+    ];
+    for pair in order.windows(2) {
+        assert!(
+            priority(pair[0]) > priority(pair[1]),
+            "{} must outrank {}",
+            pair[0],
+            pair[1]
+        );
+    }
+
+    // `overrides` names the template-matched screens a keyword probe may
+    // take back. A typo would silently disable the override, so every entry
+    // must name another screen that exists.
+    for (name, spec) in screens.as_object().unwrap() {
+        let Some(overrides) = spec["detect"]["overrides"].as_array() else {
+            continue;
+        };
+        for target in overrides {
+            let target = target.as_str().unwrap();
+            assert!(
+                screens.get(target).is_some(),
+                "{name} overrides unknown screen {target}"
+            );
+            assert_ne!(name, target, "{name} must not override itself");
+        }
+    }
+}

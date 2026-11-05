@@ -143,7 +143,7 @@ impl Runner {
         }
     }
 
-    pub(crate) fn complete_rank_up_quest_run(&mut self) {
+    pub(crate) fn complete_quest_run(&mut self) {
         self.completed_mission_runs += 1;
         self.emit_run_progress();
         self.team_changed = false;
@@ -177,7 +177,7 @@ impl Runner {
                 // detectable BattleResultContinue frame. Seeing the list
                 // after SupportSelect was reached is the safe completion
                 // boundary for that route.
-                self.complete_rank_up_quest_run();
+                self.complete_quest_run();
             }
             runtime.phase = RankUpQuestPhase::NeedList;
             runtime.reset_stability();

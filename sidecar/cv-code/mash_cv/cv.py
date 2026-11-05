@@ -647,6 +647,25 @@ def _read_region_luma(img: np.ndarray, region: dict) -> dict:
     }
 
 
+def _frame_thumbnail(img: np.ndarray, width: int = 64, height: int = 36) -> dict:
+    """Downscaled grayscale frame for before/after pan comparison.
+
+    The map has no landmarks at its edges, so "did the view move?" is
+    answered by pixel difference rather than by label changes. A small
+    thumbnail keeps the reply cheap enough to take twice per pan.
+    """
+    width = max(2, min(int(width), 256))
+    height = max(2, min(int(height), 256))
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    small = cv2.resize(gray, (width, height), interpolation=cv2.INTER_AREA)
+    return {
+        "ok": True,
+        "width": width,
+        "height": height,
+        "pixels": small.astype(np.uint8).flatten().tolist(),
+    }
+
+
 def _probe_order_change_selection(
     img: np.ndarray,
     slot_x: float,
@@ -2107,112 +2126,270 @@ def _find_element_by_name(
 # ---------------------------------------------------------------------------
 
 
-def _detect_screen(
+def _has_template_detect(det: dict) -> bool:
+    """Return whether ``det`` carries a template-based probe."""
+    if isinstance(det.get("templateOptions"), list) and det["templateOptions"]:
+        return True
+    if isinstance(det.get("requiredTemplates"), list) and det["requiredTemplates"]:
+        return True
+    if isinstance(det.get("templates"), list) and det["templates"]:
+        return True
+    return bool(det.get("template"))
+
+
+def _has_keyword_detect(det: dict) -> bool:
+    """Return whether ``det`` carries an OCR-keyword probe."""
+    groups = det.get("keywordGroups")
+    if isinstance(groups, list) and groups:
+        return True
+    keywords = det.get("keywords")
+    return isinstance(keywords, list) and bool(keywords)
+
+
+def _has_blank_detect(det: dict) -> bool:
+    """Return whether ``det`` carries a frame-brightness probe."""
+    blank = det.get("blank")
+    if isinstance(blank, dict):
+        return True
+    return isinstance(blank, list) and any(isinstance(rule, dict) for rule in blank)
+
+
+def _blank_detect_score(img: np.ndarray, det: dict) -> float:
+    """Score a brightness probe (used by text-free loading screens).
+
+    Each rule is ``{"minBrightness": .., "maxBrightness": ..}`` over the
+    frame mean (0..255). This deliberately reads no text: it is the last
+    resort after template and keyword probes, and its only job is to name
+    a frame the loop must wait on instead of tapping.
+    """
+    rules = det.get("blank")
+    rules = rules if isinstance(rules, list) else [rules]
+    mean = float(img.mean())
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        minimum = float(rule.get("minBrightness", 0.0))
+        maximum = float(rule.get("maxBrightness", 255.0))
+        if minimum <= mean <= maximum:
+            return 1.0
+    return 0.0
+
+
+def _normalize_detect_text(text: str) -> str:
+    """Normalize OCR text for keyword containment (NFKC, no whitespace)."""
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(text or "")))
+
+
+def _keyword_groups(det: dict, region: dict) -> list[dict]:
+    """Return the normalized keyword groups for a screen.
+
+    ``keywordGroups`` is an AND list; each group matches when any of its
+    ``anyOf`` keywords appears in the group's region. The shorthand
+    ``keywords`` is one group over ``detect.region``.
+    """
+    groups = det.get("keywordGroups")
+    if isinstance(groups, list) and groups:
+        return [group for group in groups if isinstance(group, dict)]
+    keywords = det.get("keywords")
+    if isinstance(keywords, list) and keywords:
+        return [
+            {
+                "anyOf": keywords,
+                "region": region,
+                "minScore": det.get("minScore", 0.0),
+            }
+        ]
+    return []
+
+
+def _keyword_detect_score(
     img: np.ndarray,
-    screen_names: Optional[list[str]] = None,
+    det: dict,
+    region: dict,
+    ocr_cache: dict[tuple, dict],
+) -> float:
+    """Score an OCR-keyword screen.
+
+    A group's score is the confidence of its best matching fragment; the
+    screen score is the weakest group, mirroring ``requiredTemplates``.
+    OCR is cached per region so several screens sharing a probe box only
+    pay for one recognition pass per frame.
+    """
+    groups = _keyword_groups(det, region)
+    if not groups:
+        return 0.0
+    group_scores: list[float] = []
+    for group in groups:
+        any_of = [
+            normalized
+            for normalized in (
+                _normalize_detect_text(keyword)
+                for keyword in group.get("anyOf", [])
+                if str(keyword).strip()
+            )
+            if normalized
+        ]
+        if not any_of:
+            return 0.0
+        group_region = group.get("region", region)
+        cache_key = (
+            float(group_region.get("x", 0.0)),
+            float(group_region.get("y", 0.0)),
+            float(group_region.get("w", 1.0)),
+            float(group_region.get("h", 1.0)),
+        )
+        if cache_key not in ocr_cache:
+            ocr_cache[cache_key] = _ocr_region(img, group_region)
+        fragments = ocr_cache[cache_key].get("fragments", [])
+        min_score = float(group.get("minScore", det.get("minScore", 0.0)))
+        best = 0.0
+        for fragment in fragments:
+            text = _normalize_detect_text(fragment.get("text", ""))
+            if not text:
+                continue
+            confidence = float(fragment.get("ocrConfidence", 0.0))
+            if confidence < min_score:
+                continue
+            if any(keyword in text for keyword in any_of):
+                best = max(best, confidence)
+        if best <= 0.0:
+            return 0.0
+        group_scores.append(best)
+    return min(group_scores) if group_scores else 0.0
+
+
+def _template_detect_score(
+    img: np.ndarray,
+    det: dict,
+    region: dict,
+    threshold: float,
+) -> float:
+    """Score a template-based screen probe (the legacy detector)."""
+    template_options = det.get("templateOptions")
+    if isinstance(template_options, list) and template_options:
+        screen_score = 0.0
+        # Options are intentionally ordered. The battle-speed detector,
+        # for example, must accept the double-arrow template before the
+        # single arrow that is also present inside it.
+        for option in template_options:
+            if not isinstance(option, dict) or not option.get("template"):
+                continue
+            key = str(option["template"])
+            tmpl = _get_template(key)
+            if option.get("masked"):
+                result = _score_template_region(
+                    img,
+                    tmpl,
+                    option.get("region", region),
+                    float(option.get("threshold", threshold)),
+                    key,
+                    template_scale=float(option.get("templateScale", 1.0)),
+                    template_reference_width=option.get("templateReferenceWidth"),
+                )
+            else:
+                result = _match_template_region(
+                    img,
+                    tmpl,
+                    option.get("region", region),
+                    float(option.get("threshold", threshold)),
+                    key,
+                )
+            if result.get("found"):
+                screen_score = float(result.get("score", 0.0))
+                break
+        return screen_score
+
+    required_templates = det.get("requiredTemplates")
+    if isinstance(required_templates, list) and required_templates:
+        required_scores: list[float] = []
+        for required in required_templates:
+            if not isinstance(required, dict):
+                return 0.0
+            key = required.get("template")
+            if not key:
+                return 0.0
+            tmpl = _get_template(str(key))
+            result = _match_template_region(
+                img,
+                tmpl,
+                required.get("region", DEFAULT_REGION),
+                float(required.get("threshold", threshold)),
+                str(key),
+                required.get("templateReferenceWidth"),
+            )
+            if not result.get("found"):
+                return 0.0
+            required_scores.append(float(result.get("score", 0.0)))
+        return min(required_scores) if required_scores else 0.0
+
+    # Accept either a single ``template`` string or a ``templates``
+    # list. The list form lets one screen carry multiple variant
+    # templates (e.g. CN's friend-request prompt has both a light and
+    # a dark background skin) — we run all variants and keep the
+    # highest score, treating them as alternatives. Falls back to the
+    # legacy single-template form if neither is present.
+    keys: list[str] = []
+    if isinstance(det.get("templates"), list):
+        keys = [str(k) for k in det["templates"] if k]
+    elif det.get("template"):
+        keys = [str(det["template"])]
+    screen_score = 0.0
+    for key in keys:
+        tmpl = _get_template(key)
+        result = _match_template_region(
+            img,
+            tmpl,
+            region,
+            threshold,
+            key,
+            det.get("templateReferenceWidth"),
+        )
+        if result.get("found"):
+            score = float(result.get("score", 0.0))
+            if score > screen_score:
+                screen_score = score
+    return screen_score
+
+
+def _detect_candidates(
+    img: np.ndarray,
+    candidates: list[tuple[str, dict]],
+    *,
+    probe: str,
 ) -> dict:
     best_name = "Unknown"
     best_score = 0.0
     best_priority = 0
-    for screen_name, spec in config.get("screens", {}).items():
-        if screen_names is not None and screen_name not in screen_names:
+    ocr_cache: dict[tuple, dict] = {}
+    if probe == "keyword":
+        # Every keyword probe is an OCR call. Ranking up front lets a match
+        # stop the scan: a lower-priority screen can never outrank one that
+        # already matched. Same-priority candidates still all run so the
+        # score tie-break is unchanged.
+        candidates = sorted(
+            candidates, key=lambda item: -int(item[1].get("priority", 0))
+        )
+    for screen_name, det in candidates:
+        if probe == "keyword":
+            if not _has_keyword_detect(det):
+                continue
+        elif probe == "blank":
+            if not _has_blank_detect(det):
+                continue
+        elif not _has_template_detect(det):
             continue
-        det = spec.get("detect")
-        if not det:
-            continue
+        priority = int(det.get("priority", 0))
+        if probe == "keyword" and best_name != "Unknown" and priority < best_priority:
+            break
         begin_candidate(screen_name, det)
         threshold = float(det.get("threshold", 0.85))
         region = det.get("region", DEFAULT_REGION)
-        template_options = det.get("templateOptions")
-        if isinstance(template_options, list) and template_options:
-            screen_score = 0.0
-            # Options are intentionally ordered. The battle-speed detector,
-            # for example, must accept the double-arrow template before the
-            # single arrow that is also present inside it.
-            for option in template_options:
-                if not isinstance(option, dict) or not option.get("template"):
-                    continue
-                key = str(option["template"])
-                tmpl = _get_template(key)
-                if option.get("masked"):
-                    result = _score_template_region(
-                        img,
-                        tmpl,
-                        option.get("region", region),
-                        float(option.get("threshold", threshold)),
-                        key,
-                        template_scale=float(option.get("templateScale", 1.0)),
-                        template_reference_width=option.get("templateReferenceWidth"),
-                    )
-                else:
-                    result = _match_template_region(
-                        img,
-                        tmpl,
-                        option.get("region", region),
-                        float(option.get("threshold", threshold)),
-                        key,
-                    )
-                if result.get("found"):
-                    screen_score = float(result.get("score", 0.0))
-                    break
+        if probe == "keyword":
+            screen_score = _keyword_detect_score(img, det, region, ocr_cache)
+        elif probe == "blank":
+            screen_score = _blank_detect_score(img, det)
         else:
-            required_templates = det.get("requiredTemplates")
-        if (
-            not (isinstance(template_options, list) and template_options)
-            and isinstance(required_templates, list)
-            and required_templates
-        ):
-            required_scores: list[float] = []
-            for required in required_templates:
-                if not isinstance(required, dict):
-                    required_scores = []
-                    break
-                key = required.get("template")
-                if not key:
-                    required_scores = []
-                    break
-                tmpl = _get_template(str(key))
-                result = _match_template_region(
-                    img,
-                    tmpl,
-                    required.get("region", DEFAULT_REGION),
-                    float(required.get("threshold", threshold)),
-                    str(key),
-                    required.get("templateReferenceWidth"),
-                )
-                if not result.get("found"):
-                    required_scores = []
-                    break
-                required_scores.append(float(result.get("score", 0.0)))
-            screen_score = min(required_scores) if required_scores else 0.0
-        # Accept either a single ``template`` string or a ``templates``
-        # list. The list form lets one screen carry multiple variant
-        # templates (e.g. CN's friend-request prompt has both a light and
-        # a dark background skin) — we run all variants and keep the
-        # highest score, treating them as alternatives. Falls back to the
-        # legacy single-template form if neither is present.
-        elif not (isinstance(template_options, list) and template_options):
-            keys: list[str] = []
-            if isinstance(det.get("templates"), list):
-                keys = [str(k) for k in det["templates"] if k]
-            elif det.get("template"):
-                keys = [str(det["template"])]
-            screen_score = 0.0
-            for key in keys:
-                tmpl = _get_template(key)
-                result = _match_template_region(
-                    img,
-                    tmpl,
-                    region,
-                    threshold,
-                    key,
-                    det.get("templateReferenceWidth"),
-                )
-                if result.get("found"):
-                    score = float(result.get("score", 0.0))
-                    if score > screen_score:
-                        screen_score = score
-        priority = int(det.get("priority", 0))
+            screen_score = _template_detect_score(img, det, region, threshold)
         if screen_score > 0.0 and (
             priority > best_priority
             or (priority == best_priority and screen_score > best_score)
@@ -2221,6 +2398,52 @@ def _detect_screen(
             best_name = screen_name
             best_priority = priority
     return {"screen": best_name, "score": best_score}
+
+
+def _detect_screen(
+    img: np.ndarray,
+    screen_names: Optional[list[str]] = None,
+) -> dict:
+    """Classify a frame, cheapest probes first.
+
+    Passes run in order and the first pass with a match wins: template
+    probes (legacy behaviour, and the battle/settlement screens the runner
+    depends on), then OCR-keyword probes, then frame-brightness probes.
+    A screen may define several probe kinds; each runs in its own pass.
+
+    A keyword screen may list ``overrides``: screen names whose template
+    match it must be re-checked against. Confirmation dialogs reuse the
+    template of the page they sit on (the support-list refresh dialog
+    matches the support-list template), so a template hit on a listed
+    screen is re-run through the keyword pass restricted to the
+    overriding screens. Only a keyword match wins; otherwise the
+    template result stands, so the check costs nothing on every other
+    frame.
+    """
+    candidates: list[tuple[str, dict]] = []
+    for screen_name, spec in config.get("screens", {}).items():
+        if screen_names is not None and screen_name not in screen_names:
+            continue
+        det = spec.get("detect")
+        if det:
+            candidates.append((screen_name, det))
+    for probe in ("template", "keyword", "blank"):
+        result = _detect_candidates(img, candidates, probe=probe)
+        if result["screen"] == "Unknown":
+            continue
+        if probe == "template":
+            overrides = [
+                (name, det)
+                for name, det in candidates
+                if isinstance(det.get("overrides"), list)
+                and result["screen"] in det["overrides"]
+            ]
+            if overrides:
+                override = _detect_candidates(img, overrides, probe="keyword")
+                if override["screen"] != "Unknown":
+                    return override
+        return result
+    return {"screen": "Unknown", "score": 0.0}
 
 
 # ---------------------------------------------------------------------------
@@ -5395,11 +5618,11 @@ def _support_parse_np_level_text(text: str) -> Optional[int]:
     m = re.search(r"等级\s*([1-5])", normalized)
     if not m:
         # JP renders NP levels as ``Lv.5``. Whole-list OCR may lose the
-        # narrow ``v`` or punctuation, so accept the observed ``LV5`` /
-        # ``L5`` variants as long as the level is the final digit in the
-        # fragment (apart from decorations such as the NP-strength arrow).
+        # narrow ``v``, read it as ``y``, or turn the dot into a comma.
+        # Accept those observed variants while requiring a level prefix
+        # and a final single digit (apart from NP-strength decorations).
         m = re.search(
-            r"L(?:V)?\s*\.?\s*([1-5])(?=\D*$)",
+            r"L\s*(?:[VY]\s*)?[.,]?\s*([1-5])(?=\D*$)",
             normalized,
             flags=re.IGNORECASE,
         )
@@ -6376,16 +6599,22 @@ CE_GRAND_BOND_TEMPLATE = "shared/icon_grand_bond_ce"
 CE_GRAND_BOND_NP_TEMPLATE = "shared/icon_grand_bond_ce_np"
 CE_DECORATION_ICON_THRESHOLD = 0.70
 
-# Event bonus badges sit over the lower-left corner of the support CE strip.
-# A full-strip CCOEFF match can drop just below threshold even when the
-# correct CE is visible (for example 0.66 / 0.70). Keep the conservative
-# threshold for the full strip, but require higher scores from the smaller
-# occlusion-safe crops because less artwork means higher false-positive risk.
+# Partial artwork crops provide a fallback for additional occlusion. They
+# still require the full artwork's sanity gate so a small similar patch
+# cannot match a different CE by itself.
 CE_OCCLUSION_CENTER_LEFT_CROP_PX = 26
 CE_OCCLUSION_CENTER_RIGHT_CROP_PX = 30
 CE_OCCLUSION_TOP_RIGHT_LEFT_CROP_PX = 26
 CE_OCCLUSION_TOP_RIGHT_BOTTOM_CROP_PX = 22
 CE_OCCLUSION_SAFE_MIN_FULL_SCORE = 0.60
+# Ordinary CE strips carry an event badge / bonus text at bottom-left and
+# the MLB star at bottom-right. Ignore only those corners in the full
+# artwork check, keeping about 75% of the picture for the sanity gate.
+# Fractions are relative to the resized template, independent of frame size.
+CE_FULL_ARTWORK_OCCLUSIONS = (
+    {"x": 0.0, "y": 0.60, "w": 0.40, "h": 0.40},
+    {"x": 0.82, "y": 0.50, "w": 0.18, "h": 0.50},
+)
 
 # In Grand Saber rows the bond / bondNp slot renders the CE artwork at the
 # asset's native ~2.2:1 aspect ratio centered inside the wider 3.45:1 slot
@@ -6466,6 +6695,19 @@ def _load_ce_template(
     return gray
 
 
+def _ce_full_artwork_mask(tmpl: np.ndarray) -> np.ndarray:
+    """Exclude UI decorations without dropping the full-width artwork context."""
+    h, w = tmpl.shape[:2]
+    mask = np.full((h, w), 255, dtype=np.uint8)
+    for region in CE_FULL_ARTWORK_OCCLUSIONS:
+        x0 = int(round(region["x"] * w))
+        y0 = int(round(region["y"] * h))
+        x1 = int(round((region["x"] + region["w"]) * w))
+        y1 = int(round((region["y"] + region["h"]) * h))
+        mask[y0:y1, x0:x1] = 0
+    return mask
+
+
 def _ce_artwork_match_templates(tmpl: np.ndarray) -> list[tuple[str, np.ndarray]]:
     """Return full and occlusion-safe CE artwork templates.
 
@@ -6519,10 +6761,10 @@ def _verify_support_ce(
 ) -> dict:
     """Score a row's CE icon against ``template_path``.
 
-    ``region`` is the absolute search window (typically the row rect with
-    ``SUPPORT_CE_OFFSET_IN_ROW`` applied on the Rust side). We crop the
-    region in grayscale, resize the template to the crop's width, and
-    take ``max(matchTemplate)`` with ``TM_CCOEFF_NORMED``.
+    ``region`` is the absolute search window projected from a row anchor.
+    Match grayscale artwork at the frame's icon scale, masking ordinary
+    full-template corners occupied by UI decorations. Bond slots retain
+    their separate inset/full artwork geometry.
 
     Returns ``{"score": float, "passed": bool}``. An empty crop yields
     ``score=0.0, passed=False``. An unreadable template raises
@@ -6641,7 +6883,18 @@ def _verify_support_ce(
                 )
                 continue
 
-            res = cv2.matchTemplate(crop_gray, attempt_tmpl, cv2.TM_CCOEFF_NORMED)
+            if variant == "full" and not bond_mode_active:
+                res = cv2.matchTemplate(
+                    crop_gray,
+                    attempt_tmpl,
+                    cv2.TM_CCOEFF_NORMED,
+                    mask=_ce_full_artwork_mask(attempt_tmpl),
+                )
+                # A constant masked patch has no defined correlation. OpenCV
+                # can return NaN/inf there; it must never become a match.
+                res = np.where(np.isfinite(res), res, -1.0)
+            else:
+                res = cv2.matchTemplate(crop_gray, attempt_tmpl, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, _ = cv2.minMaxLoc(res)
             score_candidate = float(max_val)
             margin = score_candidate - attempt_threshold
@@ -6963,7 +7216,7 @@ def _start_stream(cmd: dict) -> dict:
     max_fps = int(cmd.get("maxFps", 0))
     display_id = int(cmd.get("displayId", 0))
 
-    new_stream = ScrcpyStream(
+    stream_options = dict(
         adb_path=adb_path,
         jar_path=jar_path,
         serial=serial,
@@ -6972,10 +7225,20 @@ def _start_stream(cmd: dict) -> dict:
         max_fps=max_fps,
         display_id=display_id,
     )
+    control = cmd.get("control") is True
+    new_stream = ScrcpyStream(**stream_options, control=control)
     try:
         width, height = new_stream.start()
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"failed to start stream: {exc}"}
+        if not control:
+            return {"ok": False, "error": f"failed to start stream: {exc}"}
+        print(f"[scrcpy-control] startup failed; using video only and ADB input: {exc}", file=sys.stderr)
+        new_stream.stop()
+        new_stream = ScrcpyStream(**stream_options, control=False)
+        try:
+            width, height = new_stream.start()
+        except Exception as fallback_exc:  # noqa: BLE001
+            return {"ok": False, "error": f"failed to start stream: {fallback_exc}"}
 
     # Wait for the first decoded frame. Scrcpy on BlueStacks / the bundled
     # sidecar can take several seconds to warm up the H.264 pipeline before
@@ -6993,7 +7256,22 @@ def _start_stream(cmd: dict) -> dict:
         }
 
     stream = new_stream
-    return {"ok": True, "width": width, "height": height, "displayId": display_id}
+    result = {"ok": True, "width": width, "height": height, "displayId": display_id}
+    if control:
+        result["control"] = new_stream.control_info()
+    return result
+
+
+def _scrcpy_touch(cmd: dict) -> dict:
+    if stream is None:
+        return {"ok": False, "error": "stream not started"}
+    try:
+        stream.send_touch(cmd)
+    except (ValueError, RuntimeError, OSError) as exc:
+        # Rejected input must not tear down the shared video/recognition process.
+        # Do not replay: a socket failure may have delivered part of the gesture.
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True}
 
 
 def _stop_stream() -> dict:
@@ -7172,6 +7450,8 @@ def _main_repl() -> None:
                 _reply(req_id, _set_sequence_recognition_mode(str(cmd.get("mode", ""))))
             elif action == "start_stream":
                 _reply(req_id, _start_stream(cmd))
+            elif action == "scrcpy_touch":
+                _reply(req_id, _scrcpy_touch(cmd))
             elif action == "stop_stream":
                 _reply(req_id, _stop_stream())
             elif action == "release_ocr":
@@ -7390,6 +7670,44 @@ def _main_repl() -> None:
                     _reply(req_id, {"fragments": [], "fullText": "", "error": err})
                 else:
                     _reply(req_id, _ocr_region(img, cmd.get("region", DEFAULT_REGION)))
+            elif action == "read_map_labels":
+                from mash_cv import event_map
+                img, err = _load_frame(cmd)
+                if img is None:
+                    _reply(req_id, {"labels": [], "fullText": "", "error": err})
+                else:
+                    _reply(req_id, event_map.read_map_labels(img, _ocr_region))
+            elif action == "read_quest_card":
+                from mash_cv import event_map
+                img, err = _load_frame(cmd)
+                if img is None:
+                    _reply(
+                        req_id,
+                        {"found": False, "name": "", "level": 0, "plus": 0, "ap": 0,
+                         "locked": False, "cond": "", "fullText": "", "error": err},
+                    )
+                else:
+                    _reply(req_id, event_map.read_quest_card(img, _ocr_region))
+            elif action == "read_event_points":
+                from mash_cv import event_map
+                img, err = _load_frame(cmd)
+                if img is None:
+                    _reply(req_id, {"points": None, "fullText": "", "error": err})
+                else:
+                    _reply(req_id, event_map.read_event_points(img, _ocr_region))
+            elif action == "frame_thumbnail":
+                img, err = _load_frame(cmd)
+                if img is None:
+                    _reply(req_id, {"ok": False, "pixels": [], "error": err})
+                else:
+                    _reply(
+                        req_id,
+                        _frame_thumbnail(
+                            img,
+                            int(cmd.get("width", 64)),
+                            int(cmd.get("height", 36)),
+                        ),
+                    )
             elif action == "read_bond_level_up":
                 img, err = _load_frame(cmd)
                 if img is None:

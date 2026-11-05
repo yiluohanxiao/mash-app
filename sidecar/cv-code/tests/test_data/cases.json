@@ -15,6 +15,41 @@
     {
       "image": "screenshots/support_select.png",
       "expectedScreen": "SupportSelect"
+    },
+    {
+      "image": "screenshots/event_map_cn_device_halloween2026.png",
+      "expectedScreen": "EventMap",
+      "server": "cn"
+    },
+    {
+      "image": "screenshots/node_detail_cn_device_halloween2026.png",
+      "expectedScreen": "NodeDetail",
+      "server": "cn"
+    },
+    {
+      "image": "screenshots/support_select_cn_device_halloween2026.png",
+      "expectedScreen": "SupportSelect",
+      "server": "cn"
+    },
+    {
+      "image": "screenshots/reward_notice_cn_device_halloween2026.png",
+      "expectedScreen": "NpCeNotice",
+      "server": "cn"
+    },
+    {
+      "image": "screenshots/tap_continue_cn_device_halloween2026.png",
+      "expectedScreen": "TapContinue",
+      "server": "cn"
+    },
+    {
+      "image": "screenshots/game_notice_cn_device_halloween2026.png",
+      "expectedScreen": "GameNotice",
+      "server": "cn"
+    },
+    {
+      "image": "screenshots/command_code_detail_cn_device_halloween2026.png",
+      "expectedScreen": "CommandCodeDetail",
+      "server": "cn"
     }
   ],
   "findElement": [
@@ -65,6 +100,18 @@
       },
       "threshold": 0.8,
       "expectedFound": false
+    },
+    {
+      "image": "screenshots/reward_notice_cn_device_halloween2026.png",
+      "templateKey": "button_np_ce_notice_close",
+      "region": {
+        "x": 0.32,
+        "y": 0.70,
+        "w": 0.36,
+        "h": 0.16
+      },
+      "threshold": 0.8,
+      "expectedFound": true
     }
   ]
 }
