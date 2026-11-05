@@ -120,6 +120,11 @@ pub(crate) struct EventFarmRuntime {
     /// Cards behind the current target pick (scan cache or live scan).
     /// The ▶-tap verification merges a live card read into this list.
     pub(crate) last_cards: Vec<QuestCard>,
+    /// A scan saw zero locked cards: every visible quest is already
+    /// unlocked, so settlement no longer needs the delta rescan. The run
+    /// keeps farming the highest-level quest; cards that unlock behind
+    /// new sections later would be missed until a restart re-scans.
+    pub(crate) unlock_progress_complete: bool,
     /// Last「关闭」tap on an unexpected card, and how many were issued.
     /// The card's 关闭 sits where the event map's back arrow lives, so a
     /// second tap fired before the card finishes closing would leave the
@@ -142,6 +147,7 @@ impl EventFarmRuntime {
             last_cards: Vec::new(),
             last_node_close: None,
             node_close_taps: 0,
+            unlock_progress_complete: false,
         }
     }
 }
@@ -214,6 +220,15 @@ pub(crate) fn decide_target(
             EventPlan::Story(card) | EventPlan::Farm(card) => Ok(card),
         },
     }
+}
+
+/// Whether a scan saw no locked cards at all — every visible quest is
+/// already unlocked, so nothing a delta rescan looks for remains and the
+/// post-settlement rescan can be skipped for the rest of the run. An
+/// empty scan never qualifies: it means the scan itself failed, not
+/// that everything is unlocked.
+pub(crate) fn scan_shows_nothing_locked(cards: &[QuestCard]) -> bool {
+    !cards.is_empty() && cards.iter().all(|card| !card.locked)
 }
 
 /// Outcome of verifying the pending card against a live read before
@@ -826,7 +841,7 @@ impl Runner {
     }
 
     fn select_event_target(&mut self) -> Result<QuestCard, String> {
-        let (target, rescan, bad_labels) = self
+        let (target, rescan_needed, bad_labels) = self
             .event_farm_runtime
             .as_ref()
             .map(|runtime| {
@@ -837,9 +852,21 @@ impl Runner {
                 )
             })
             .unwrap_or((None, false, HashMap::new()));
+        let unlock_complete = self
+            .event_farm_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.unlock_progress_complete);
+        let rescan = rescan_needed && !unlock_complete;
+        if rescan_needed && unlock_complete {
+            self.emit("EventMap", "所有可见关卡均已解锁，跳过增量重扫");
+        }
         let cards = self.event_scan_cards(rescan)?;
         if let Some(runtime) = self.event_farm_runtime.as_mut() {
             runtime.last_cards = cards.clone();
+            if scan_shows_nothing_locked(&cards) && !runtime.unlock_progress_complete {
+                runtime.unlock_progress_complete = true;
+                self.emit("EventMap", "扫描未发现待解锁关卡，后续跳过增量重扫");
+            }
         }
         let explicit = target.as_deref().filter(|t| !t.trim().is_empty());
         // Points only matter for the automatic plan; skip the OCR read
@@ -850,6 +877,9 @@ impl Runner {
             None
         };
         let card = decide_target(&cards, explicit, points, &bad_labels)?;
+        if let Some(runtime) = self.event_farm_runtime.as_mut() {
+            runtime.rescan_needed = false;
+        }
         if card.is_story() {
             self.emit("EventMap", &format!("推进主线「{}」", card.name));
         } else {
@@ -857,9 +887,6 @@ impl Runner {
                 "EventMap",
                 &format!("刷活动点数：「{}」等级{}", card.name, card.level_text()),
             );
-        }
-        if let Some(runtime) = self.event_farm_runtime.as_mut() {
-            runtime.rescan_needed = false;
         }
         Ok(card)
     }
@@ -1156,6 +1183,20 @@ mod tests {
     fn decide_target_errors_when_nothing_is_usable() {
         let cards = [card("刷点本", 90, 1, 40, true, "b")];
         assert!(decide_target(&cards, None, Some(0), &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn scan_shows_nothing_locked_requires_a_real_scan_and_zero_locks() {
+        // Empty scan = scan failed, never treated as "everything unlocked".
+        assert!(!scan_shows_nothing_locked(&[]));
+        assert!(scan_shows_nothing_locked(&[
+            card("剧情", 10, 0, 5, false, "a"),
+            card("刷点本", 90, 1, 40, false, "b"),
+        ]));
+        assert!(!scan_shows_nothing_locked(&[
+            card("剧情", 10, 0, 5, false, "a"),
+            card("还没解锁", 90, 0, 40, true, "b"),
+        ]));
     }
 
     #[test]
