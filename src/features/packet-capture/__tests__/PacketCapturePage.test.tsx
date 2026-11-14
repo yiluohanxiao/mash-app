@@ -1,20 +1,25 @@
+import { Theme } from "@radix-ui/themes";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type Event } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithTheme } from "../../../test/renderWithTheme";
 import { PacketCapturePage } from "../PacketCapturePage";
 import { invokeDevMock } from "../../../devMock";
-import type { CaptureConfiguration, CaptureRecord, PacketCaptureWorkspace } from "../../../types/packetCapture";
+import type { CaptureAppList, CaptureConfiguration, CaptureRecord, PacketCaptureWorkspace } from "../../../types/packetCapture";
+
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
 const actions = vi.fn();
 const reads = vi.fn();
 const recordReads = vi.fn();
 const savedRecords = new Map<string, CaptureRecord>();
 let current: PacketCaptureWorkspace;
-const idle = { phase: "idle" as const, serial: null, message: "", response: null };
-const configured: CaptureConfiguration = { serial: "device", packageName: "com.bilibili.fatego", reqableVersion: "3.3.5", message: "环境配置完成，请点击开始按钮（设备重启后可能需要重新配置）" };
+let exerciseClientRequests = false;
+const idle = { phase: "idle" as const, serial: null, message: "", warnings: [], retryAfterMs: 1000, response: null };
+const configured: CaptureConfiguration = { serial: "device", packageName: "com.bilibili.fatego", reqableVersion: "3.3.5", warnings: [], message: "环境配置完成，请点击开始按钮（设备重启后可能需要重新配置）" };
 function record(id: string, capturedAt = Date.UTC(2026, 9, 26, 12), body = "raw%3D+response") : CaptureRecord {
   return {
     entry: { id, capturedAt, serial: "device" },
@@ -27,6 +32,8 @@ function showRecords(...records: CaptureRecord[]) {
   current.history = { records: records.map(r => r.entry), defaultRecordId: records[0]?.entry.id ?? null };
 }
 beforeEach(() => {
+  exerciseClientRequests = false;
+  vi.mocked(openUrl).mockReset().mockResolvedValue(undefined);
   current = { capture: idle, history: { records: [], defaultRecordId: null } };
   savedRecords.clear();
   recordReads.mockReset().mockImplementation(async (id: string) => savedRecords.get(id));
@@ -34,6 +41,8 @@ beforeEach(() => {
   vi.mocked(listen).mockReset().mockResolvedValue(() => {});
   reads.mockReset().mockImplementation(async () => current);
   vi.mocked(invoke).mockReset().mockImplementation((command, args) => {
+    if (command === "get_packet_capture_apps" && !exerciseClientRequests) return Promise.reject("设备未连接");
+    if (command === "get_packet_capture_authorization") return Promise.resolve(null);
     if (command === "get_packet_capture_workspace") return reads();
     if (command === "select_packet_capture_record") return recordReads((args as { recordId: string }).recordId);
     return actions(command, args);
@@ -42,6 +51,105 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); });
 
 describe("PacketCapturePage", () => {
+  it("reports a native browser-open failure with a manual URL and allows retry", async () => {
+    const user = userEvent.setup();
+    current.capture = { phase: "idle", serial: null, message: "请在 Reqable 设置中开启 API 服务后重试", warnings: [], retryAfterMs: 1000 };
+    vi.mocked(openUrl).mockRejectedValueOnce(new Error("native opener failed"));
+    renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+    const link = await screen.findByRole("link", { name: "开启 API 服务" });
+    await user.click(link);
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法打开浏览器，请手动访问：https://docs.mash.xiaotongx.com/");
+    await user.click(link);
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(openUrl).toHaveBeenCalledTimes(2);
+  });
+
+  it("links API service setup instructions within startup errors without changing the full message", async () => {
+    const user = userEvent.setup();
+    const message = "Reqable 控制接口尚未就绪：Reqable API 服务未启用，请在 Reqable 设置中开启 API 服务后重试";
+    actions.mockRejectedValue(message);
+    renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "开始" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "开始" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(message);
+    const guide = within(alert).getByRole("link", { name: "开启 API 服务" });
+    expect(guide).toHaveAttribute("href", "https://docs.mash.xiaotongx.com/guides/package-capture/#api-%E6%9C%8D%E5%8A%A1");
+    expect(guide).toHaveAttribute("target", "_blank");
+    expect(guide).toHaveAttribute("rel", "noopener noreferrer");
+    await user.click(guide);
+    expect(openUrl).toHaveBeenCalledExactlyOnceWith("https://docs.mash.xiaotongx.com/guides/package-capture/#api-%E6%9C%8D%E5%8A%A1");
+  });
+
+  it("shows API key copy progress during startup and stops accepting hints after cancellation", async () => {
+    const user = userEvent.setup();
+    let progress!: (event: Event<string>) => void;
+    const unlisten = vi.fn();
+    vi.mocked(listen).mockImplementation(async (name, handler) => {
+      if (name === "packet-capture-context-changed") return () => {};
+      expect(name).toBe("packet-capture-start-progress");
+      progress = handler as typeof progress;
+      return unlisten;
+    });
+    let rejectStart!: (reason: string) => void;
+    actions.mockImplementation((command: string) => {
+      if (command === "start_packet_capture") return new Promise((_resolve, reject) => { rejectStart = reject; });
+      if (command === "stop_packet_capture") { rejectStart("抓包启动已停止"); return Promise.resolve(); }
+      throw new Error(command);
+    });
+    renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "开始" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "开始" }));
+    const hint = "API 服务开启后，请创建 API key 并点击复制，mash 将自动验证并保存";
+    act(() => progress({ event: "packet-capture-start-progress", id: 1, payload: hint }));
+    expect(screen.getByRole("status")).toHaveTextContent(hint);
+    const guide = screen.getByRole("link", { name: "创建 API key" });
+    expect(guide).toHaveAttribute("href", "https://docs.mash.xiaotongx.com/guides/package-capture/#api-%E6%9C%8D%E5%8A%A1");
+    expect(guide).toHaveAttribute("target", "_blank");
+    await user.click(guide);
+    expect(openUrl).toHaveBeenCalledTimes(1);
+    const invalidFormatHint = "已收到剪贴板内容，但不是 API key 格式，请在 Reqable 中复制生成的 API key";
+    act(() => progress({ event: "packet-capture-start-progress", id: 1, payload: invalidFormatHint }));
+    expect(screen.getByRole("status")).toHaveTextContent(invalidFormatHint);
+    expect(screen.getByRole("link", { name: "复制生成的 API key" })).toHaveAttribute("href", "https://docs.mash.xiaotongx.com/guides/package-capture/#api-%E6%9C%8D%E5%8A%A1");
+    await user.click(screen.getByRole("link", { name: "复制生成的 API key" }));
+    expect(openUrl).toHaveBeenCalledTimes(2);
+    expect(openUrl).toHaveBeenLastCalledWith("https://docs.mash.xiaotongx.com/guides/package-capture/#api-%E6%9C%8D%E5%8A%A1");
+    expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "停止" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "开始" })).toBeEnabled());
+    expect(unlisten).toHaveBeenCalledTimes(1);
+    act(() => progress({ event: "packet-capture-start-progress", id: 1, payload: "late key hint" }));
+    expect(screen.queryByText("late key hint")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("removes the startup progress subscription after a successful key import and start", async () => {
+    const user = userEvent.setup();
+    let progress!: (event: Event<string>) => void;
+    const unlisten = vi.fn();
+    vi.mocked(listen).mockImplementation(async (name, handler) => {
+      if (name === "packet-capture-context-changed") return () => {};
+      progress = handler as typeof progress; return unlisten;
+    });
+    let finish!: () => void;
+    actions.mockImplementation(() => new Promise(resolve => {
+      finish = () => {
+        current.capture = { phase: "waiting", serial: "device", message: "等待数据中，请重新进入游戏……", warnings: [], retryAfterMs: 1000 };
+        resolve({ serial: "device", message: "已开始抓取国服 FGO 流量" });
+      };
+    }));
+    renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "开始" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "开始" }));
+    act(() => progress({ event: "packet-capture-start-progress", id: 1, payload: "API key 已验证并保存，正在启动抓包…" }));
+    expect(screen.getByRole("status")).toHaveTextContent("API key 已验证并保存");
+    await act(async () => finish());
+    expect(unlisten).toHaveBeenCalledTimes(1);
+    act(() => progress({ event: "packet-capture-start-progress", id: 1, payload: "late hint" }));
+    expect(screen.getByRole("status")).toHaveTextContent("等待数据中");
+  });
+
   it("renders the browser development mock's empty workspace without attempting a record read", async () => {
     vi.mocked(invoke).mockImplementation((command, args) => invokeDevMock(command, args as Record<string, unknown> | undefined));
     renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
@@ -143,7 +251,7 @@ describe("PacketCapturePage", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("renders the empty layout and only exposes one environment action without device calls on mount", async () => {
+  it("renders the empty layout and one environment action while discovering clients", async () => {
     renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
     expect(await screen.findByText("暂无历史记录")).toBeInTheDocument();
     expect(screen.getByText("尚无账户物品")).toBeInTheDocument();
@@ -188,13 +296,14 @@ describe("PacketCapturePage", () => {
     let progress!: (event: Event<string>) => void;
     const unlisten = vi.fn();
     vi.mocked(listen).mockImplementation(async (name, handler) => {
+      if (name === "packet-capture-context-changed") return () => {};
       expect(name).toBe("packet-capture-setup-progress");
       progress = handler as typeof progress;
       return unlisten;
     });
     let finish!: (value: CaptureConfiguration) => void;
     actions.mockImplementation(() => {
-      expect(listen).toHaveBeenCalledTimes(1);
+      expect(listen).toHaveBeenCalledTimes(2);
       return new Promise(resolve => { finish = resolve; });
     });
     renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
@@ -215,7 +324,7 @@ describe("PacketCapturePage", () => {
   it("unsubscribes setup progress when leaving during configuration", async () => {
     const user = userEvent.setup();
     const unlisten = vi.fn();
-    vi.mocked(listen).mockResolvedValue(unlisten);
+    vi.mocked(listen).mockImplementation(async name => name === "packet-capture-context-changed" ? () => {} : unlisten);
     let finish!: (value: CaptureConfiguration) => void;
     actions.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     const view = renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
@@ -434,7 +543,7 @@ describe("PacketCapturePage", () => {
     const saved = record("a");
     reads.mockResolvedValueOnce({ ...current, capture: { ...idle, phase: "waiting", message: "等待响应" } });
     showRecords(saved);
-    current.capture = { phase: "error", serial: "device", message: "已获取响应；请在设备上手动关闭抓包" };
+    current.capture = { phase: "error", serial: "device", message: "已获取响应；请在设备上手动关闭抓包", warnings: [], retryAfterMs: 1000 };
     const view = renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
     await act(async () => {});
     expect(screen.getByRole("status")).toHaveTextContent("等待响应");
@@ -475,7 +584,8 @@ describe("PacketCapturePage cancellation", () => {
     const user = userEvent.setup();
     let progress!: (event: Event<string>) => void;
     const unlisten = vi.fn();
-    vi.mocked(listen).mockImplementation(async (_name, handler) => {
+    vi.mocked(listen).mockImplementation(async (name, handler) => {
+      if (name === "packet-capture-context-changed") return () => {};
       progress = handler as typeof progress;
       return unlisten;
     });
@@ -530,7 +640,7 @@ describe("PacketCapturePage cancellation", () => {
     const user = userEvent.setup();
     let finishListen!: (unlisten: () => void) => void;
     const unlisten = vi.fn();
-    vi.mocked(listen).mockImplementation(() => new Promise(resolve => { finishListen = resolve; }));
+    vi.mocked(listen).mockImplementation(name => name === "packet-capture-context-changed" ? Promise.resolve(() => {}) : new Promise(resolve => { finishListen = resolve; }));
     actions.mockResolvedValue(undefined);
     renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
     await user.click(screen.getByRole("button", { name: "环境配置" }));
@@ -561,4 +671,323 @@ describe("PacketCapturePage stop recovery", () => {
     expect(screen.getByRole("button", { name: "返回" })).toBeEnabled();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
+});
+
+describe("PacketCapturePage client selection", () => {
+  beforeEach(() => { exerciseClientRequests = true; });
+  const channel = { packageName: "com.bilibili.fgo.mi", name: "国服 FGO（渠道服）" };
+  const official = { packageName: "com.bilibili.fatego", name: "国服 FGO（官服）" };
+
+  function contextChanged() {
+    const handler = vi.mocked(listen).mock.calls.find(([name]) => name === "packet-capture-context-changed")![1];
+    act(() => handler({ event: "packet-capture-context-changed", id: 1, payload: null }));
+  }
+
+  it.each(["server", "device"] as const)("refreshes the displayed target after switching %s and pins setup/start to it", async change => {
+    const user = userEvent.setup();
+    const original: CaptureAppList = { serial: "device", server: "CN", apps: [channel], selectedPackage: channel.packageName };
+    const app = change === "server" ? { name: "日服 FGO（官服）", packageName: "com.aniplex.fategrandorder" } : official;
+    const next: CaptureAppList = { serial: change === "device" ? "other-device" : "device", server: change === "server" ? "JP" : "CN", apps: [app], selectedPackage: app.packageName };
+    actions.mockResolvedValue(original);
+    renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+    const trigger = screen.getByRole("button", { name: "选择客户端" });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    await user.click(trigger);
+    await screen.findByRole("button", { name: `${channel.name} · ${channel.packageName}` });
+    await user.keyboard("{Escape}");
+    let finishRefresh!: (value: CaptureAppList) => void;
+    actions.mockImplementation(command => command === "get_packet_capture_apps" ? new Promise(resolve => { finishRefresh = resolve; }) : Promise.resolve(configured));
+    contextChanged();
+    expect(trigger).toHaveTextContent("选择客户端");
+    expect(trigger).not.toHaveTextContent(channel.packageName);
+    await waitFor(() => expect(actions).toHaveBeenLastCalledWith("get_packet_capture_apps", undefined));
+    await user.click(screen.getByRole("button", { name: "环境配置" }));
+    expect(actions.mock.calls.some(([command]) => command === "setup_packet_capture")).toBe(false);
+    await act(async () => finishRefresh(next));
+    await waitFor(() => expect(actions).toHaveBeenLastCalledWith("setup_packet_capture", { clientContext: { serial: next.serial, server: next.server, selectedPackage: next.selectedPackage } }));
+    expect(trigger).toHaveTextContent(app.packageName);
+    await waitFor(() => expect(screen.getByRole("button", { name: "开始" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "开始" }));
+    expect(actions).toHaveBeenLastCalledWith("start_packet_capture", { clientContext: { serial: next.serial, server: next.server, selectedPackage: next.selectedPackage } });
+  });
+
+  it("restores the remembered client in the header on each page entry", async () => {
+    const list: CaptureAppList = { serial: "device", server: "CN", apps: [official, channel], selectedPackage: channel.packageName };
+    actions.mockResolvedValue(list);
+    const view = renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "选择客户端" })).toHaveTextContent(channel.packageName));
+    expect(screen.queryByRole("dialog", { name: "抓包客户端" })).not.toBeInTheDocument();
+    view.unmount();
+    renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "选择客户端" })).toHaveTextContent(channel.packageName));
+    expect(actions).toHaveBeenCalledTimes(2);
+  });
+
+  it("discards discovery from before a context change and retries after its device lease is released", async () => {
+    const user = userEvent.setup();
+    const original: CaptureAppList = { serial: "old-device", server: "CN", apps: [channel], selectedPackage: channel.packageName };
+    const next: CaptureAppList = { ...original, serial: "new-device", apps: [official], selectedPackage: official.packageName };
+    let finishOld!: (value: CaptureAppList) => void;
+    actions.mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve; })).mockResolvedValue(next);
+    renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+    const trigger = screen.getByRole("button", { name: "选择客户端" });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    await user.click(trigger);
+    contextChanged();
+    expect(actions).toHaveBeenCalledTimes(1);
+    await act(async () => finishOld(original));
+    await waitFor(() => expect(trigger).toHaveTextContent(official.packageName));
+    expect(trigger).not.toHaveTextContent(channel.packageName);
+    expect(actions).toHaveBeenCalledTimes(2);
+  });
+
+  it("blocks device actions when refreshing a changed context fails", async () => {
+    const user = userEvent.setup();
+    actions.mockRejectedValue("设备暂时离线");
+    renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "环境配置" })).toBeEnabled());
+    await waitFor(() => expect(actions).toHaveBeenCalledTimes(1));
+    actions.mockClear();
+    contextChanged();
+    await waitFor(() => expect(actions).toHaveBeenCalledExactlyOnceWith("get_packet_capture_apps", undefined));
+    await user.click(screen.getByRole("button", { name: "环境配置" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("客户端信息已变更");
+    await user.click(screen.getByRole("button", { name: "开始" }));
+    expect(actions).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["light", "dark"] as const)("refreshes from the adjacent action menu without clearing the selection in %s mode", async appearance => {
+    const user = userEvent.setup();
+    const list = { serial: "device", server: "CN", apps: [channel], selectedPackage: channel.packageName };
+    actions.mockResolvedValue(list);
+    renderWithTheme(<Theme appearance={appearance}><PacketCapturePage onBack={vi.fn()} /></Theme>);
+    const trigger = screen.getByRole("button", { name: "选择客户端" });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    await user.click(trigger);
+    const dropdown = await screen.findByRole("dialog", { name: "抓包客户端" });
+    await within(dropdown).findByRole("button", { name: `${channel.name} · ${channel.packageName}` });
+    expect(within(dropdown).queryByText("刷新")).not.toBeInTheDocument();
+
+    let finishRefresh!: (value: typeof list) => void;
+    actions.mockImplementation(() => new Promise(resolve => { finishRefresh = resolve; }));
+    await user.click(screen.getByRole("button", { name: "客户端操作" }));
+    expect(screen.queryByRole("dialog", { name: "抓包客户端" })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("menuitem", { name: "刷新" }));
+    expect(trigger).toHaveTextContent(channel.packageName);
+    expect(screen.getByRole("button", { name: "返回" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "环境配置" })).toBeEnabled();
+    expect(actions).toHaveBeenLastCalledWith("get_packet_capture_apps", undefined);
+    await user.click(screen.getByRole("button", { name: "客户端操作" }));
+    expect(await screen.findByRole("menuitem", { name: "刷新" })).toHaveAttribute("aria-disabled", "true");
+    await act(async () => finishRefresh(list));
+    expect(screen.getByRole("menuitem", { name: "刷新" })).not.toHaveAttribute("aria-disabled", "true");
+    await user.keyboard("{Escape}");
+  });
+
+  it.each([false, true])("waits for client discovery before setup and respects stop while queued (%s)", async stopWhileQueued => {
+    const user = userEvent.setup();
+    const list = { serial: "device", server: "CN", apps: [channel], selectedPackage: channel.packageName };
+    let finishDiscovery!: (value: typeof list) => void;
+    actions.mockImplementation(async command => {
+      if (command === "get_packet_capture_apps") return new Promise(resolve => { finishDiscovery = resolve; });
+      if (command === "setup_packet_capture") return configured;
+    });
+    renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "选择客户端" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "选择客户端" }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "环境配置" }));
+    expect(actions.mock.calls.some(([command]) => command === "setup_packet_capture")).toBe(false);
+    expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
+    if (stopWhileQueued) await user.click(screen.getByRole("button", { name: "停止" }));
+    await act(async () => finishDiscovery(list));
+    await waitFor(() => expect(screen.getByRole("button", { name: "环境配置" })).toBeEnabled());
+    expect(actions.mock.calls.filter(([command]) => command === "setup_packet_capture")).toHaveLength(stopWhileQueued ? 0 : 1);
+  });
+
+  it.each(["light", "dark"] as const)("keeps the page and selected label stable while reopening the dropdown in %s mode", async appearance => {
+    const user = userEvent.setup();
+    const onNavigationLockChange = vi.fn();
+    const list = { serial: "device", server: "CN", apps: [channel], selectedPackage: channel.packageName };
+    showRecords(record("saved"));
+    actions.mockResolvedValue(list);
+    renderWithTheme(<Theme appearance={appearance}><PacketCapturePage onBack={vi.fn()} onNavigationLockChange={onNavigationLockChange} /></Theme>);
+    const response = await screen.findByRole("textbox", { name: "抓包原始响应" });
+    await waitFor(() => expect(response).toHaveValue("raw%3D+response"));
+    const trigger = screen.getByRole("button", { name: "选择客户端" });
+    await user.click(trigger);
+    await screen.findByRole("button", { name: `${channel.name} · ${channel.packageName}` });
+    await user.keyboard("{Escape}");
+    reads.mockClear();
+    recordReads.mockClear();
+    onNavigationLockChange.mockClear();
+
+    let finishRefresh!: (value: typeof list) => void;
+    actions.mockImplementation(() => new Promise(resolve => { finishRefresh = resolve; }));
+    await user.click(trigger);
+    expect(trigger).toHaveTextContent(channel.packageName);
+    expect(screen.getByRole("button", { name: `${channel.name} · ${channel.packageName}` })).toBeInTheDocument();
+    expect(screen.queryByLabelText("正在读取客户端")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "返回" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "复制抓包结果" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "环境配置" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "开始" })).toBeEnabled();
+    expect(onNavigationLockChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "抓包原始响应" })).toBe(response);
+    await act(async () => finishRefresh(list));
+    await waitFor(() => expect(screen.getByRole("button", { name: "环境配置" })).toBeEnabled());
+    expect(reads).not.toHaveBeenCalled();
+    expect(recordReads).not.toHaveBeenCalled();
+    expect(onNavigationLockChange).not.toHaveBeenCalled();
+    await user.keyboard("{Escape}");
+  });
+
+  it.each(["light", "dark"] as const)("opens the channel list directly from the header in %s mode", async appearance => {
+    const user = userEvent.setup();
+    actions.mockResolvedValue({ serial: "device", server: "CN", apps: [channel], selectedPackage: channel.packageName });
+    renderWithTheme(<Theme appearance={appearance}><PacketCapturePage onBack={vi.fn()} /></Theme>);
+    const trigger = screen.getByRole("button", { name: "选择客户端" });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    await user.click(trigger);
+    const dropdown = await screen.findByRole("dialog", { name: "抓包客户端" });
+    expect(await within(dropdown).findByRole("button", { name: `${channel.name} · ${channel.packageName}` })).toHaveAttribute("aria-pressed", "true");
+    expect(trigger).toHaveTextContent(channel.packageName);
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(actions.mock.calls).toEqual([["get_packet_capture_apps", undefined], ["get_packet_capture_apps", undefined]]);
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "环境配置" }));
+    expect(actions).toHaveBeenLastCalledWith("setup_packet_capture", { clientContext: { serial: "device", server: "CN", selectedPackage: channel.packageName } });
+  });
+
+  it("saves a channel choice and closes the dropdown after backend confirmation", async () => {
+    const user = userEvent.setup();
+    const list = { serial: "device", server: "CN", apps: [official, channel], selectedPackage: null };
+    let finishChoice!: (value: typeof list | Omit<typeof list, "selectedPackage"> & { selectedPackage: string }) => void;
+    actions.mockImplementation(async command => {
+      if (command === "setup_packet_capture") throw new Error("请在顶部选择需要抓包的客户端，再进行环境配置");
+      return command === "select_packet_capture_app" ? new Promise(resolve => { finishChoice = resolve; }) : list;
+    });
+    renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+    const trigger = screen.getByRole("button", { name: "选择客户端" });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "环境配置" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("请在顶部选择需要抓包的客户端");
+    await user.click(trigger);
+    const choice = await screen.findByRole("button", { name: `${channel.name} · ${channel.packageName}` });
+    expect(screen.getByRole("alert")).toHaveTextContent("请在顶部选择需要抓包的客户端");
+    expect(choice).toHaveAttribute("aria-pressed", "false");
+    await user.click(choice);
+    expect(actions).toHaveBeenLastCalledWith("select_packet_capture_app", { serial: "device", server: "CN", packageName: channel.packageName });
+    expect(screen.getByRole("dialog", { name: "抓包客户端" })).toBeInTheDocument();
+    expect(trigger).toHaveTextContent("选择客户端");
+    await act(async () => finishChoice({ ...list, selectedPackage: channel.packageName }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "抓包客户端" })).not.toBeInTheDocument());
+    expect(trigger).toHaveTextContent(channel.packageName);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps the dropdown and backend selection after a rejected change and allows refreshing", async () => {
+    const user = userEvent.setup();
+    const list = { serial: "device", server: "CN", apps: [official, channel], selectedPackage: official.packageName };
+    actions.mockImplementation(async command => {
+      if (command === "select_packet_capture_app") throw new Error("设备已切换，请刷新客户端列表后重试");
+      return list;
+    });
+    renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+    const trigger = screen.getByRole("button", { name: "选择客户端" });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    await user.click(trigger);
+    await user.click(await screen.findByRole("button", { name: `${channel.name} · ${channel.packageName}` }));
+    const dropdown = screen.getByRole("dialog", { name: "抓包客户端" });
+    expect(await within(dropdown).findByRole("alert")).toHaveTextContent("设备已切换");
+    expect(trigger).toHaveTextContent(official.packageName);
+    expect(within(dropdown).getByRole("button", { name: `${official.name} · ${official.packageName}` })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "客户端操作" }));
+    await user.click(await screen.findByRole("menuitem", { name: "刷新" }));
+    await waitFor(() => expect(trigger).toHaveTextContent(official.packageName));
+    await user.click(trigger);
+    const refreshed = await screen.findByRole("dialog", { name: "抓包客户端" });
+    expect(await within(refreshed).findByRole("button", { name: `${official.name} · ${official.packageName}` })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("shows an empty client list and blocks selection during capture", async () => {
+    const user = userEvent.setup();
+    actions.mockResolvedValue({ serial: "device", server: "CN", apps: [], selectedPackage: null });
+    const view = renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "选择客户端" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "选择客户端" }));
+    expect(await screen.findByText("未检测到当前服务器的 FGO 客户端")).toBeInTheDocument();
+    view.unmount();
+    current.capture = { phase: "waiting", serial: "device", message: "等待数据中", warnings: [], retryAfterMs: 1000 };
+    renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+    await screen.findByRole("button", { name: "停止" });
+    expect(screen.getByRole("button", { name: "选择客户端" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "客户端操作" })).toBeDisabled();
+  });
+});
+
+it("keeps nonblocking backend warnings visible alongside a normal capture status", async () => {
+  current.capture = { ...idle, phase: "waiting", serial: "device", warnings: ["无法确认 VPN 的应用范围，已继续抓包"] };
+  renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+  expect(await screen.findByLabelText("抓包提醒")).toHaveTextContent("无法确认 VPN 的应用范围");
+  expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("opens manual key input from the status message and clears drafts on close or request completion", async () => {
+  const user = userEvent.setup();
+  let progress!: (event: Event<string>) => void;
+  vi.mocked(listen).mockImplementation(async (name, handler) => {
+    if (name === "packet-capture-start-progress") progress = handler as typeof progress;
+    return () => {};
+  });
+  let rejectStart!: (error: string) => void;
+  const defaultInvoke = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation((command, args) => {
+    if (command === "get_packet_capture_authorization") return Promise.resolve({ requestId: "auth-device-a", serial: "device-a", message: "请手动输入 Reqable API key", acceptingInput: true });
+    return defaultInvoke(command, args);
+  });
+  actions.mockImplementation(async command => {
+    if (command === "start_packet_capture") return new Promise((_resolve, reject) => { rejectStart = reject; });
+    if (command === "stop_packet_capture") rejectStart("抓包启动已停止");
+  });
+  renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+  await user.click(await screen.findByRole("button", { name: "开始" }));
+  const entry = await screen.findByRole("button", { name: "手动输入" });
+  expect(entry.closest(".capture-status")).not.toBeNull();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Reqable API key")).not.toBeInTheDocument();
+  act(() => progress({ event: "packet-capture-start-progress", id: 1, payload: "API 服务开启后，请创建 API key 并点击复制，或手动输入" }));
+  expect(screen.getAllByRole("button", { name: "手动输入" })).toHaveLength(1);
+  expect(screen.getByRole("status").textContent).toBe("API 服务开启后，请创建 API key 并点击复制，或手动输入");
+  expect(screen.getByRole("link", { name: "创建 API key" })).toHaveAttribute("href", "https://docs.mash.xiaotongx.com/guides/package-capture/#api-%E6%9C%8D%E5%8A%A1");
+  await user.click(screen.getByRole("button", { name: "手动输入" }));
+  const dialog = await screen.findByRole("dialog", { name: "手动输入 API key" });
+  act(() => progress({ event: "packet-capture-start-progress", id: 2, payload: "正在等待授权…" }));
+  expect(screen.getByRole("dialog", { name: "手动输入 API key" })).toBe(dialog);
+  const input = within(dialog).getByLabelText("Reqable API key");
+  expect(input).toHaveAttribute("type", "password");
+  await user.type(input, "test-private-manual-key");
+  await user.click(screen.getByRole("button", { name: "验证并继续" }));
+  expect(actions).toHaveBeenCalledWith("submit_packet_capture_api_key", { requestId: "auth-device-a", key: "test-private-manual-key" });
+  await waitFor(() => expect(input).toHaveValue(""));
+  await user.type(input, "discard-this-draft");
+  await user.click(within(dialog).getByRole("button", { name: "关闭" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
+  await user.click(screen.getByRole("button", { name: "手动输入" }));
+  expect(await screen.findByLabelText("Reqable API key")).toHaveValue("");
+  // Ending the backend request closes the dialog even while it is open.
+  await act(async () => { rejectStart("抓包启动已停止"); });
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(screen.queryByRole("button", { name: "手动输入" })).not.toBeInTheDocument();
+});
+
+it("shows an automatic game launch failure in the waiting message", async () => {
+  const message = "等待数据中，自动启动游戏失败，请重新进入游戏……";
+  current.capture = { ...idle, phase: "waiting", serial: "device", message };
+  renderWithTheme(<PacketCapturePage onBack={vi.fn()} />);
+  expect(await screen.findByRole("status")).toHaveTextContent(message);
+  expect(screen.queryByLabelText("抓包提醒")).not.toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });

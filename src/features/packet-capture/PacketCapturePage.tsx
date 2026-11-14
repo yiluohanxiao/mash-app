@@ -1,18 +1,41 @@
-import { Button, Flex, IconButton, Skeleton } from "@radix-ui/themes";
+import { Callout, Button, Flex, IconButton, Link, Skeleton } from "@radix-ui/themes";
 import { CopyIcon, DownloadIcon, TrashIcon } from "@radix-ui/react-icons";
-import { useEffect } from "react";
+import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { PageHeader } from "../../components/common/PageHeader";
 import { SectionHeading } from "../../components/common/SectionHeading";
 import { TaskActionButton } from "../../components/common/TaskActionButton";
+import { FooterNote } from "../../components/common/FooterNote";
 import type { CaptureHistoryEntry } from "../../types/packetCapture";
+import { CaptureAuthorization } from "./CaptureAuthorization";
+import { CaptureClientPicker } from "./CaptureClientPicker";
 import { CaptureInventory, CaptureInventorySkeleton } from "./CaptureInventory";
 import { usePacketCapture } from "./usePacketCapture";
+import { openExternalUrl } from "../../tauri";
 
 function dateLabel(timestamp: number) {
   return new Date(timestamp).toLocaleDateString("sv-SE").replace(/-/g, ".");
 }
 function timeLabel(timestamp: number) {
   return new Date(timestamp).toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+const API_SERVICE_GUIDE = "https://docs.mash.xiaotongx.com/guides/package-capture/#api-%E6%9C%8D%E5%8A%A1";
+
+function CaptureStatusMessage({ message, manualEntry }: { message: string; manualEntry?: ReactNode }) {
+  const [failedMessage, setFailedMessage] = useState<string | null>(null);
+  return <>{message.split(/(开启 API 服务|创建 API key|复制生成的 API key|手动输入(?: Reqable API key| API key)?)/g).map((part, index) =>
+    part.startsWith("手动输入") && manualEntry
+      ? <Fragment key={index}>{manualEntry}</Fragment>
+      : part === "开启 API 服务" || part === "创建 API key" || part === "复制生成的 API key"
+      ? <a key={index} href={API_SERVICE_GUIDE} target="_blank" rel="noopener noreferrer" onClick={event => {
+        // Handle the desktop bridge explicitly and prevent a second open from
+        // the opener plugin's document-level anchor listener.
+        event.preventDefault();
+        setFailedMessage(null);
+        void openExternalUrl(API_SERVICE_GUIDE).catch(() => setFailedMessage(message));
+      }}>{part}</a>
+      : part,
+  )}{manualEntry && !message.includes("手动输入") && <> {manualEntry}</>}{failedMessage === message && <small role="alert">无法打开浏览器，请手动访问：{API_SERVICE_GUIDE}</small>}</>;
 }
 
 function CaptureEmpty({ title, detail, loading = false }: { title: string; detail?: string; loading?: boolean }) {
@@ -24,10 +47,12 @@ function CaptureEmpty({ title, detail, loading = false }: { title: string; detai
 
 export function PacketCapturePage({ onBack, onNavigationLockChange }: { onBack: () => void; onNavigationLockChange?: (locked: boolean) => void }) {
   const capture = usePacketCapture();
+  const [authorizationDialogId, setAuthorizationDialogId] = useState<string | null>(null);
   useEffect(() => {
     onNavigationLockChange?.(capture.navigationLocked);
   }, [capture.navigationLocked, onNavigationLockChange]);
   useEffect(() => () => onNavigationLockChange?.(false), [onNavigationLockChange]);
+  const authorization = capture.authorization;
   const history = capture.workspace?.history;
   const selected = capture.selected;
   const selectedEntry = history?.records.find(entry => entry.id === capture.selectedId);
@@ -40,7 +65,7 @@ export function PacketCapturePage({ onBack, onNavigationLockChange }: { onBack: 
     groups.set(day, [...groups.get(day) ?? [], entry]);
   }
   return <main className="main-content-inner workspace-page packet-capture-page" aria-label="抓包">
-    <PageHeader title="数据抓包" english="PACKET CAPTURE" onBack={onBack} backDisabled={capture.navigationLocked}>{null}</PageHeader>
+    <PageHeader title="数据抓包" english="PACKET CAPTURE" onBack={onBack} backDisabled={capture.navigationLocked}><CaptureClientPicker capture={capture} /></PageHeader>
     <div className="capture-body">
       <aside className="capture-history" aria-label="抓包历史记录">
         <header className="capture-history-header">
@@ -89,10 +114,17 @@ export function PacketCapturePage({ onBack, onNavigationLockChange }: { onBack: 
         </section>
       </div>
     </div>
+    {authorization && <CaptureAuthorization key={authorization.requestId} prompt={authorization} submit={capture.submitApiKey}
+      open={authorizationDialogId === authorization.requestId} onOpenChange={open => setAuthorizationDialogId(open ? authorization.requestId : null)} />}
+    {!!capture.workspace?.capture.warnings.length && <Callout.Root color="amber" size="1" aria-label="抓包提醒">
+      <Callout.Text>{capture.workspace.capture.warnings.map(warning => <span key={warning} style={{ display: "block" }}>{warning}</span>)}</Callout.Text>
+    </Callout.Root>}
     <Flex className="page-footer capture-footer" gap="5">
-      <div className="capture-status" role={capture.error ? "alert" : "status"} data-error={!!capture.error}>
-        {(capture.error || capture.message) && <><i className="capture-diamond" aria-hidden="true" /><span>{capture.error || capture.message}</span></>}
-      </div>
+      <FooterNote className="capture-status" role={capture.error ? "alert" : "status"}>
+        {(capture.error || capture.message) && <CaptureStatusMessage message={capture.error || capture.message} manualEntry={authorization && <Link asChild>
+          <button type="button" onClick={() => setAuthorizationDialogId(authorization.requestId)}>手动输入</button>
+        </Link>} />}
+      </FooterNote>
       <Button variant="ghost" color="gray" className="capture-setup" aria-label="环境配置" title="设备需已安装 Reqable 并具备 root 权限；设备重启后需重新配置" disabled={capture.busy || capture.canStop} onClick={() => void capture.setup()}><span><small>SETUP</small><span>环境配置</span></span></Button>
       <TaskActionButton label={capture.canStop ? "停止" : "开始"} running={capture.canStop} disabled={capture.operation === "stop" || (capture.busy && !capture.canStop)} onClick={() => void (capture.canStop ? capture.stop() : capture.start())} />
     </Flex>

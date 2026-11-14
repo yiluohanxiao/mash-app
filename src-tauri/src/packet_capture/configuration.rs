@@ -1,36 +1,62 @@
-use super::{find_root, root_shell, run_adb, select_serial, shell_quote, AdbCommand};
+use super::target;
+use super::{
+    find_root, read_shell_bytes, root_shell, run_adb, select_serial, shell_quote, AdbCommand,
+};
 use crate::device_operation::OperationCancellation;
+use crate::Server;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-const PACKAGE: &str = "com.bilibili.fatego";
-const VERSION: &str = "3.3.5";
+const MIN_VERSION: [u32; 3] = [3, 3, 5];
 const CONFIG: &str = "/data/user/0/com.reqable.android/files/config/capture_config";
 const MAX_CONFIG_SIZE: usize = 64 * 1024;
 const ABSENT: &[u8] = b"MASH_CONFIG_ABSENT";
 
-pub(super) fn prepare_capture_configuration(
-    shell: &mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
-) -> Result<(), String> {
-    let info = shell("dumpsys package com.reqable.android")?;
-    if !String::from_utf8_lossy(&info)
+fn reqable_version(info: &[u8]) -> Result<String, String> {
+    let info = String::from_utf8_lossy(info);
+    let version = info
         .lines()
-        .any(|line| line.trim() == format!("versionName={VERSION}"))
-    {
-        return Err(format!("当前抓包仅支持已验证的 Reqable {VERSION}"));
+        .find_map(|line| line.trim().strip_prefix("versionName="))
+        .filter(|version| !version.is_empty())
+        .unwrap_or("未知");
+    if super::version::parse(version).is_some_and(|parts| parts < MIN_VERSION) {
+        return Err(format!(
+            "需要 Reqable {}.{}.{} 或以上版本（当前版本：{version}）",
+            MIN_VERSION[0], MIN_VERSION[1], MIN_VERSION[2]
+        ));
     }
+    Ok(version.into())
+}
+
+pub(super) fn prepare_capture_configuration(
+    server: Server,
+    package: &str,
+    shell: &mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
+) -> Result<(String, Vec<String>), String> {
+    let info = shell("dumpsys package com.reqable.android")?;
+    let version = reqable_version(&info)?;
     let root = find_root(shell)?;
-    let bytes = shell(&root_shell(
+    let bytes = read_shell_bytes(
         root,
         &format!("head -c {} {CONFIG}", MAX_CONFIG_SIZE + 1),
-    ))
-    .map_err(|_| "请先点击环境配置，将 Reqable 设置为仅抓国服 FGO")?;
+        shell,
+    )
+    .map_err(|_| {
+        format!(
+            "请先点击环境配置，将 Reqable 设置为仅抓所选{} FGO 客户端",
+            target::label(server)
+        )
+    })?;
     let config = parse_config(&bytes)?;
-    if cn_config(config.clone()) != config {
-        return Err("请先点击环境配置，将 Reqable 设置为仅抓国服 FGO".into());
+    let mut warnings = capture_warnings(package, &config)?;
+    if let Err(error) = super::picture_in_picture::disable(root, shell) {
+        warnings.push(format!("{error}（不影响本次抓包）"));
     }
-    super::picture_in_picture::disable(root, shell)
+    if super::version::parse(&version).is_none() {
+        warnings.push("无法识别 Reqable 版本，将通过控制接口验证可用性".into());
+    }
+    Ok((version, warnings))
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -40,14 +66,23 @@ pub(crate) struct CaptureConfiguration {
     package_name: String,
     reqable_version: String,
     pub(super) message: String,
+    pub(crate) warnings: Vec<String>,
 }
 
 pub(crate) fn configure(
+    server: Server,
+    package: &str,
     adb_path: &Path,
     selected: Option<&str>,
     cancellation: &OperationCancellation,
 ) -> Result<CaptureConfiguration, String> {
-    configure_controlled_using(selected, &mut |args| run_adb(adb_path, args), cancellation)
+    configure_controlled_using(
+        server,
+        package,
+        selected,
+        &mut |args| run_adb(adb_path, args),
+        cancellation,
+    )
 }
 
 fn parse_config(bytes: &[u8]) -> Result<Value, String> {
@@ -58,12 +93,13 @@ fn parse_config(bytes: &[u8]) -> Result<Value, String> {
         serde_json::from_slice(bytes).map_err(|_| "Reqable 配置格式无效，未修改原配置")?;
     let object = config.as_object().ok_or("Reqable 配置格式无效")?;
     for key in ["vpnMode", "hostMode", "androidAppsBypass", "autoCapture"] {
-        if !object.get(key).is_some_and(Value::is_boolean) {
+        if object.get(key).is_some_and(|value| !value.is_boolean()) {
             return Err(format!("Reqable 配置字段 {key} 不兼容，未修改原配置"));
         }
     }
-    if !object.get("androidApps").is_some_and(|apps| {
-        apps.as_array()
+    if object.get("androidApps").is_some_and(|apps| {
+        !apps
+            .as_array()
             .is_some_and(|apps| apps.iter().all(Value::is_string))
     }) {
         return Err("Reqable 应用选择配置不兼容，未修改原配置".into());
@@ -71,8 +107,41 @@ fn parse_config(bytes: &[u8]) -> Result<Value, String> {
     Ok(config)
 }
 
-fn cn_config(mut config: Value) -> Value {
-    config["androidApps"] = serde_json::json!([PACKAGE]);
+fn capture_warnings(package: &str, config: &Value) -> Result<Vec<String>, String> {
+    if config.get("vpnMode") == Some(&Value::Bool(false)) {
+        return Err("Reqable 未开启 VPN 模式，请重新进行环境配置".into());
+    }
+    let mut warnings = Vec::new();
+    let apps = config.get("androidApps").and_then(Value::as_array);
+    let bypass = config.get("androidAppsBypass").and_then(Value::as_bool);
+    if let (Some(apps), Some(bypass)) = (apps, bypass) {
+        let selected = apps.iter().any(|app| app.as_str() == Some(package));
+        if (bypass && selected) || (!bypass && !apps.is_empty() && !selected) {
+            return Err("Reqable 应用筛选未覆盖所选客户端，请重新进行环境配置".into());
+        }
+        if bypass || apps.len() != 1 || !selected {
+            warnings.push("Reqable 应用筛选可能包含其他应用，已继续抓包".into());
+        }
+    } else {
+        warnings.push("无法确认 Reqable 应用筛选范围，已继续抓包".into());
+    }
+    Ok(warnings)
+}
+
+fn managed_fields_match(desired: &Value, actual: &Value) -> bool {
+    [
+        "androidApps",
+        "androidAppsBypass",
+        "vpnMode",
+        "hostMode",
+        "autoCapture",
+    ]
+    .iter()
+    .all(|key| desired.get(*key) == actual.get(*key))
+}
+
+fn game_config(package: &str, mut config: Value) -> Value {
+    config["androidApps"] = serde_json::json!([package]);
     config["androidAppsBypass"] = false.into();
     config["vpnMode"] = true.into();
     config["hostMode"] = false.into();
@@ -102,10 +171,15 @@ fn opened(output: &[u8]) -> bool {
 }
 
 pub(super) fn configure_controlled_using(
+    server: Server,
+    package: &str,
     selected: Option<&str>,
     run: &mut AdbCommand<'_>,
     cancellation: &OperationCancellation,
 ) -> Result<CaptureConfiguration, String> {
+    if !target::matches_server(server, package) {
+        return Err("客户端包名与服务器不匹配".into());
+    }
     cancellation.check()?;
     let devices = run(&["devices", "-l"])?;
     let serial = select_serial(&String::from_utf8_lossy(&devices), selected)?;
@@ -129,7 +203,14 @@ pub(super) fn configure_controlled_using(
     };
     for (package, message) in [
         ("com.reqable.android", "请先在设备上安装 Reqable"),
-        (PACKAGE, "请先在设备上安装国服 FGO"),
+        (
+            package,
+            if server == Server::Cn {
+                "请先在设备上安装国服 FGO"
+            } else {
+                "请先在设备上安装日服 FGO"
+            },
+        ),
     ] {
         let output = forward(&format!("pm path {package}"))?;
         if !String::from_utf8_lossy(&output).contains("package:") {
@@ -137,14 +218,7 @@ pub(super) fn configure_controlled_using(
         }
     }
     let info = forward("dumpsys package com.reqable.android")?;
-    let supported = String::from_utf8_lossy(&info)
-        .lines()
-        .any(|line| line.trim() == format!("versionName={VERSION}"));
-    if !supported {
-        return Err(format!(
-            "当前自动配置仅支持已验证的 Reqable {VERSION}，请确认设备上的版本"
-        ));
-    }
+    let reqable_version = reqable_version(&info)?;
     let root = find_root(&mut forward)?;
     let read = format!(
         "test -d /data/user/0/com.reqable.android/files/config || exit 1; if test -f {CONFIG}; then head -c {} {CONFIG}; elif test ! -e {CONFIG}; then echo MASH_CONFIG_ABSENT; else exit 1; fi",
@@ -152,22 +226,25 @@ pub(super) fn configure_controlled_using(
     );
     // Check compatibility before stopping a running capture.
     snapshot(
-        forward(&root_shell(root, &read))
+        read_shell_bytes(root, &read, &mut forward)
             .map_err(|_| "无法读取 Reqable 配置，请先完成 Reqable 的首次初始化")?,
     )?;
     forward("am force-stop com.reqable.android")
         .map_err(|_| "无法停止 Reqable，请关闭抓包后重试")?;
     // Read again after shutdown so we preserve its last saved settings.
     let original = snapshot(
-        forward(&root_shell(root, &read))
+        read_shell_bytes(root, &read, &mut forward)
             .map_err(|_| "无法读取 Reqable 配置，请先完成 Reqable 的首次初始化")?,
     )?;
-    let desired = cn_config(match &original {
-        Some(bytes) => parse_config(bytes)?,
-        // Reqable lazily creates this file after its first settings change.
-        // Omitted fields continue to use Reqable's own defaults.
-        None => serde_json::json!({}),
-    });
+    let desired = game_config(
+        package,
+        match &original {
+            Some(bytes) => parse_config(bytes)?,
+            // Reqable lazily creates this file after its first settings change.
+            // Omitted fields continue to use Reqable's own defaults.
+            None => serde_json::json!({}),
+        },
+    );
     let bytes = serde_json::to_vec(&desired).map_err(|_| "无法生成 Reqable 配置")?;
     if bytes.len() > MAX_CONFIG_SIZE {
         return Err("生成的 Reqable 配置过大，未修改原配置".into());
@@ -208,25 +285,29 @@ mv -f "$stage" "$p"
 echo MASH_CONFIG_WRITTEN"#,
         json = shell_quote(std::str::from_utf8(&bytes).unwrap()),
     );
+    let mut warnings = Vec::new();
+    if super::version::parse(&reqable_version).is_none() {
+        warnings.push(
+            "无法识别 Reqable 版本，已按已验证的配置字段完成配置；启动时将验证控制接口".into(),
+        );
+    }
     let attempt = (|| -> Result<(), String> {
         let result = forward(&root_shell(root, &apply)).map_err(|_| "写入 Reqable 配置失败")?;
         if result.trim_ascii() != b"MASH_CONFIG_WRITTEN" {
             return Err("Reqable 配置写入未返回验证结果".into());
         }
-        super::picture_in_picture::disable(root, &mut forward)?;
+        if let Err(error) = super::picture_in_picture::disable(root, &mut forward) {
+            warnings.push(format!("{error}（不影响本次抓包）"));
+        }
         let launch = forward("am start -W -n com.reqable.android/.MainActivity")
             .map_err(|_| "无法重新打开 Reqable")?;
         if !opened(&launch) {
             return Err("无法重新打开 Reqable".into());
         }
-        let actual = forward(&root_shell(root, &read)).map_err(|_| "无法回读 Reqable 配置")?;
+        let actual =
+            read_shell_bytes(root, &read, &mut forward).map_err(|_| "无法回读 Reqable 配置")?;
         let actual = parse_config(&actual)?;
-        if !desired
-            .as_object()
-            .unwrap()
-            .iter()
-            .all(|(key, value)| actual.get(key) == Some(value))
-        {
+        if !managed_fields_match(&desired, &actual) {
             return Err("Reqable 配置回读不一致".into());
         }
         Ok(())
@@ -274,9 +355,13 @@ echo MASH_CONFIG_RESTORED"#
     let _ = shell(&root_shell(root, &format!("rm -f {backup} {stage}")));
     Ok(CaptureConfiguration {
         serial,
-        package_name: PACKAGE.into(),
-        reqable_version: VERSION.into(),
-        message: "Reqable 已配置为仅抓国服 FGO，抓包未开启".into(),
+        package_name: package.into(),
+        reqable_version,
+        warnings,
+        message: format!(
+            "Reqable 已配置为仅抓{} FGO，抓包未开启",
+            target::label(server)
+        ),
     })
 }
 

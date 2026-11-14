@@ -1,3 +1,4 @@
+import type { ThresholdKey } from "./features/settings/recognitionSettingsModel";
 import { commandEditorDevBridge } from "./commandEditorDevMock";
 import { createInitialProjectSlots } from "./features/team/projectSlots";
 import type { AdvancedBattleScene, BattleScene } from "./types/command";
@@ -114,6 +115,7 @@ let stopOnBondMaxLevel = false;
 let verifySkillActivation = false;
 let enableExtraClassFilter = true;
 let supportFullListOcrFallback = false;
+let apRecoveryConfirmWaitMs = 1000;
 let imageRecognitionDebugMode: "enabled" | "shadow" | "disabled" = "disabled";
 let sequenceRecognitionDebugMode: "enabled" | "shadow" | "disabled" = "disabled";
 let autoCaptureBattleBeforeAttack = false;
@@ -258,6 +260,7 @@ function recognitionSettings() {
     verifySkillActivation,
     enableExtraClassFilter,
     supportFullListOcrFallback,
+    apRecoveryConfirmWaitMs,
   };
 }
 
@@ -510,6 +513,21 @@ async function invokeLegacyDevMock<T>(cmd: string, args: InvokeArgs = {}): Promi
       projects = projects.map((item) => (item.id === project.id ? clone(project) : item));
       return clone(project) as T;
     }
+    case "get_project_recognition_settings": {
+      const project = projects.find((item) => item.id === args.projectId);
+      if (!project) throw new Error(`project not found: ${args.projectId}`);
+      return { ...recognitionSettings(), ...project.recognitionSettings } as T;
+    }
+    case "set_project_recognition_threshold": {
+      const project = projects.find((item) => item.id === args.projectId);
+      if (!project) throw new Error(`project not found: ${args.projectId}`);
+      const key = args.key as ThresholdKey;
+      const settings = { ...project.recognitionSettings };
+      if (args.value == null) delete settings[key];
+      else settings[key] = Number(args.value);
+      project.recognitionSettings = Object.keys(settings).length ? settings : null;
+      return clone(project) as T;
+    }
     case "delete_project":
       projects = projects.filter((project) => project.id !== args.id);
       removeProjectFromCatalog(String(args.id));
@@ -566,6 +584,12 @@ async function invokeLegacyDevMock<T>(cmd: string, args: InvokeArgs = {}): Promi
       return { importedProjects: [] } as T;
     case "check_adb":
       return { connected: selectedAdbSerial != null, deviceName: selectedAdbSerial } as T;
+    case "get_packet_capture_authorization":
+      return null as T;
+    case "submit_packet_capture_api_key":
+      return undefined as T;
+    case "get_packet_capture_apps":
+    case "select_packet_capture_app":
     case "install_capture_certificate":
     case "configure_packet_capture":
     case "setup_packet_capture":
@@ -573,7 +597,7 @@ async function invokeLegacyDevMock<T>(cmd: string, args: InvokeArgs = {}): Promi
     case "start_packet_capture":
       throw new Error("请在 Mash 桌面端连接设备后执行此操作");
     case "get_packet_capture_workspace":
-      return { capture: { phase: "idle", serial: null, message: "" }, history: { records: [], defaultRecordId: null } } satisfies PacketCaptureWorkspace as T;
+      return { capture: { phase: "idle", serial: null, message: "", warnings: [], retryAfterMs: 1000 }, history: { records: [], defaultRecordId: null } } satisfies PacketCaptureWorkspace as T;
     case "select_packet_capture_record":
       throw new Error("抓包记录不存在");
     case "delete_packet_capture_record":
@@ -581,7 +605,7 @@ async function invokeLegacyDevMock<T>(cmd: string, args: InvokeArgs = {}): Promi
     case "copy_packet_capture_response":
       throw new Error("暂无可复制的抓包结果");
     case "get_packet_capture_response":
-      return { phase: "idle", serial: null, message: "", response: null } as T;
+      return { phase: "idle", serial: null, message: "", warnings: [], retryAfterMs: 1000, response: null } as T;
     case "get_device_resolution":
       return deviceResolutionStatus() as T;
     case "reset_device_resolution": {
@@ -718,6 +742,12 @@ async function invokeLegacyDevMock<T>(cmd: string, args: InvokeArgs = {}): Promi
       return recognitionSettings() as T;
     case "set_enable_extra_class_filter":
       enableExtraClassFilter = Boolean(args.value);
+      return recognitionSettings() as T;
+    case "set_ap_recovery_confirm_wait_ms":
+      if (typeof args.value !== "number" || !Number.isInteger(args.value) || args.value < 500 || args.value > 60000) {
+        throw new Error("回复道具确认等待时长必须在 500 到 60000 毫秒之间");
+      }
+      apRecoveryConfirmWaitMs = args.value;
       return recognitionSettings() as T;
     case "set_support_full_list_ocr_fallback":
       supportFullListOcrFallback = Boolean(args.value);

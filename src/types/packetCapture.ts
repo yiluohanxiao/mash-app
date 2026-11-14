@@ -10,18 +10,22 @@ export interface CaptureConfiguration {
   packageName: string;
   reqableVersion: string;
   message: string;
+  warnings: string[];
 }
 
 export interface CaptureStarted {
   serial: string;
   alreadyActive: boolean;
   message: string;
+  warnings: string[];
 }
 
 export interface PacketCaptureResponseState {
   phase: "idle" | "waiting" | "found" | "error";
   serial: string | null;
   message: string;
+  warnings: string[];
+  retryAfterMs: number;
   response: {
     captureId: string;
     capturedAt: number;
@@ -60,4 +64,21 @@ export interface CaptureHistoryState {
 export interface PacketCaptureWorkspace {
   capture: Omit<PacketCaptureResponseState, "response">;
   history: CaptureHistoryState;
+}
+
+export interface CaptureClientContext {
+  serial: string;
+  server: "JP" | "CN";
+  selectedPackage: string | null;
+}
+
+export interface CaptureAppList extends CaptureClientContext {
+  apps: { packageName: string; name: string }[];
+}
+
+export interface CaptureAuthorizationPrompt {
+  requestId: string;
+  serial: string;
+  message: string;
+  acceptingInput: boolean;
 }

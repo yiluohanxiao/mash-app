@@ -1,14 +1,16 @@
 //! Device-only preparation for the independent packet capture tool.
 use crate::device_operation::OperationCancellation;
 use crate::runner::LogLevel;
-use crate::{adb::Adb, platform};
+use crate::{adb::Adb, platform, Server};
 use std::path::Path;
 use std::time::Duration;
 
 mod capture;
 mod certificate;
 mod client;
+mod clipboard;
 mod configuration;
+mod credentials;
 mod history;
 mod inventory;
 mod lifecycle;
@@ -16,11 +18,17 @@ mod onboarding;
 mod picture_in_picture;
 mod response;
 mod stop;
+mod target;
+mod version;
 pub(crate) use capture::{start_capture, CaptureStarted};
 pub(crate) use configuration::{configure, CaptureConfiguration};
+pub(crate) use credentials::{ApiKeyStore, AuthorizationPrompt, AuthorizationStore};
 pub(crate) use history::{CaptureHistoryState, CaptureRecord, HistoryStore};
 pub(crate) use lifecycle::stop_task;
 pub(crate) use response::{ResponseState, ResponseStatus, ResponseStore};
+pub(crate) use target::{CaptureAppList, CaptureClientContext, CaptureTargetStore};
+#[cfg(test)]
+mod root_tests;
 #[cfg(test)]
 mod tests;
 
@@ -29,6 +37,7 @@ const CERT_PATHS: [&str; 2] = [
     "/sdcard/Android/data/com.reqable.android/files/certificate/reqable-root.crt",
 ];
 const INSTALL_SCRIPT: &str = include_str!("install_certificate.sh");
+const APEX_INSTALL_SCRIPT: &str = include_str!("install_certificate_apex.sh");
 type AdbCommand<'a> = dyn FnMut(&[&str]) -> Result<Vec<u8>, String> + 'a;
 
 #[derive(Debug, serde::Serialize)]
@@ -41,11 +50,15 @@ pub(crate) struct CertificateInstallation {
 }
 
 pub(crate) fn install(
+    server: Server,
+    package: &str,
     adb_path: &Path,
     selected: Option<&str>,
     cancellation: &OperationCancellation,
 ) -> Result<CertificateInstallation, String> {
     install_with_log_using(
+        server,
+        package,
         selected,
         &mut |args| run_adb(adb_path, args),
         &mut |_, _| {},
@@ -55,12 +68,16 @@ pub(crate) fn install(
 
 /// Keep the same device selected across both preparation steps.
 pub(crate) fn setup(
+    server: Server,
+    package: &str,
     adb_path: &Path,
     selected: Option<&str>,
     log: &mut dyn FnMut(LogLevel, &str),
     cancellation: &OperationCancellation,
 ) -> Result<CaptureConfiguration, String> {
     setup_controlled_using(
+        server,
+        package,
         selected,
         &mut |args| run_adb(adb_path, args),
         log,
@@ -69,6 +86,8 @@ pub(crate) fn setup(
 }
 
 fn setup_controlled_using(
+    server: Server,
+    package: &str,
     selected: Option<&str>,
     run: &mut AdbCommand<'_>,
     log: &mut dyn FnMut(LogLevel, &str),
@@ -77,18 +96,30 @@ fn setup_controlled_using(
     cancellation.check()?;
     log(LogLevel::Info, "开始抓包环境配置");
     let result: Result<CaptureConfiguration, String> = (|| {
-        log(LogLevel::Info, "正在安装并验证系统证书…");
-        let installed = install_with_log_using(selected, run, log, cancellation)?;
+        let installed = install_with_log_using(server, package, selected, run, log, cancellation)?;
         cancellation.check()?;
         log(
             LogLevel::Info,
             &format!("设备 {}：{}", installed.serial, installed.message),
         );
-        log(LogLevel::Info, "正在配置 Reqable，仅抓国服 FGO…");
-        let mut configured =
-            configuration::configure_controlled_using(Some(&installed.serial), run, cancellation)
-                .map_err(|error| format!("证书已安装，环境配置未完成：{error}"))?;
-        log(LogLevel::Info, "已关闭并验证 Reqable 的系统画中画权限");
+        log(
+            LogLevel::Info,
+            &format!("正在配置 Reqable，仅抓{} FGO…", target::label(server)),
+        );
+        let mut configured = configuration::configure_controlled_using(
+            server,
+            package,
+            Some(&installed.serial),
+            run,
+            cancellation,
+        )
+        .map_err(|error| format!("证书已安装，环境配置未完成：{error}"))?;
+        for warning in &configured.warnings {
+            log(LogLevel::Warn, warning);
+        }
+        if configured.warnings.is_empty() {
+            log(LogLevel::Info, "已关闭并验证 Reqable 的系统画中画权限");
+        }
         configured.message = "环境配置完成，请点击开始按钮（设备重启后可能需要重新配置）".into();
         Ok(configured)
     })();
@@ -156,6 +187,58 @@ fn select_serial(output: &str, selected: Option<&str>) -> Result<String, String>
         .ok_or_else(|| "未找到在线 ADB 设备，请先连接设备".into())
 }
 
+fn prepare_root_using(
+    serial: &str,
+    run: &mut AdbCommand<'_>,
+    log: &mut dyn FnMut(LogLevel, &str),
+    cancellation: &OperationCancellation,
+) -> Result<&'static str, String> {
+    cancellation.check()?;
+    log(LogLevel::Info, "正在检查设备 root 权限…");
+    let existing = find_root(&mut |script| {
+        cancellation.check()?;
+        run(&["-s", serial, "shell", script])
+    });
+    cancellation.check()?;
+    if let Ok(root) = existing {
+        log(LogLevel::Info, "设备 root 权限已确认");
+        return Ok(root);
+    }
+
+    log(LogLevel::Info, "未取得 root 权限，正在尝试 adb root…");
+    // A daemon restart can lose its reply. Verify the actual UID after reconnect
+    // even when this command fails, rather than trusting its text or exit status.
+    let requested = run(&["-s", serial, "root"]);
+    cancellation.check()?;
+    log(LogLevel::Info, "正在等待原设备重新连接并验证 root 权限…");
+    let reconnected = run(&["-s", serial, "wait-for-device"]);
+    cancellation.check()?;
+    reconnected.map_err(|error| format!("adb root 后等待设备 {serial} 重新连接失败：{error}"))?;
+    let verified = find_root(&mut |script| {
+        cancellation.check()?;
+        run(&["-s", serial, "shell", script])
+    });
+    cancellation.check()?;
+    match verified {
+        Ok(root) => {
+            log(LogLevel::Info, "设备 root 权限已确认");
+            Ok(root)
+        }
+        Err(error) => {
+            let detail = match requested {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).trim().to_owned(),
+                Err(error) => error,
+            };
+            let detail: String = detail.chars().take(300).collect();
+            Err(if detail.is_empty() {
+                format!("adb root 后仍{error}")
+            } else {
+                format!("adb root 后仍{error}；ADB 返回：{detail}")
+            })
+        }
+    }
+}
+
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -168,12 +251,31 @@ fn root_shell(prefix: &str, script: &str) -> String {
     }
 }
 
+/// Preserve file bytes even when an emulator's shell translates LF to CRLF.
+/// Callers bound the source read before encoding it. Keep command failures via
+/// pipefail instead of treating an unreadable file as empty successful output.
+fn read_shell_bytes(
+    root: &str,
+    script: &str,
+    shell: &mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
+) -> Result<Vec<u8>, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let script = format!("set -o pipefail; (\n{script}\n) | base64");
+    let mut encoded = shell(&root_shell(root, &script))?;
+    encoded.retain(|byte| !byte.is_ascii_whitespace());
+    STANDARD
+        .decode(encoded)
+        .map_err(|_| "设备文件编码无效，无法读取原始内容".into())
+}
+
 #[cfg(test)]
 fn install_using(
     selected: Option<&str>,
     run: &mut AdbCommand<'_>,
 ) -> Result<CertificateInstallation, String> {
     install_with_log_using(
+        Server::Cn,
+        target::package(Server::Cn),
         selected,
         run,
         &mut |_, _| {},
@@ -182,42 +284,61 @@ fn install_using(
 }
 
 fn install_with_log_using(
+    server: Server,
+    package: &str,
     selected: Option<&str>,
     run: &mut AdbCommand<'_>,
     log: &mut dyn FnMut(LogLevel, &str),
     cancellation: &OperationCancellation,
 ) -> Result<CertificateInstallation, String> {
+    if !target::matches_server(server, package) {
+        return Err("客户端包名与服务器不匹配".into());
+    }
     cancellation.check()?;
     let devices = run(&["devices", "-l"])?;
     let serial = select_serial(&String::from_utf8_lossy(&devices), selected)?;
     cancellation.bind_device(&serial)?;
+    let sdk: u32 = {
+        let mut shell = |script: &str| {
+            cancellation.check()?;
+            run(&["-s", &serial, "shell", script])
+        };
+        let package = shell("pm path com.reqable.android")?;
+        if !String::from_utf8_lossy(&package).contains("package:") {
+            return Err("请先在设备上安装 Reqable".into());
+        }
+        let sdk = shell("getprop ro.build.version.sdk")?;
+        String::from_utf8_lossy(&sdk)
+            .trim()
+            .parse()
+            .map_err(|_| "无法读取设备的 Android 版本")?
+    };
+    if sdk < 21 {
+        return Err("当前证书安装需要 Android 5 或以上版本".into());
+    }
+    let root = prepare_root_using(&serial, run, log, cancellation)?;
+    log(LogLevel::Info, "正在安装并验证系统证书…");
     let mut shell = |script: &str| {
         cancellation.check()?;
         run(&["-s", &serial, "shell", script])
     };
-    let package = shell("pm path com.reqable.android")?;
-    if !String::from_utf8_lossy(&package).contains("package:") {
-        return Err("请先在设备上安装 Reqable".into());
-    }
-    let sdk = shell("getprop ro.build.version.sdk")?;
-    let sdk: u32 = String::from_utf8_lossy(&sdk)
-        .trim()
-        .parse()
-        .map_err(|_| "无法读取设备的 Android 版本")?;
-    if !(21..=33).contains(&sdk) {
-        return Err("当前证书安装仅支持 Android 5–13；Android 14 及以上暂未适配".into());
-    }
-    let root = find_root(&mut shell)?;
     shell("am start -W -n com.reqable.android/.MainActivity")
         .map_err(|error| format!("无法打开 Reqable：{error}"))?;
     let (source_path, bytes) =
         onboarding::certificate_after_confirmation(root, &mut shell, log, cancellation)?;
     let cert = certificate::parse(&bytes)?;
-    let script = INSTALL_SCRIPT
-        .replace("__CERT_PATH__", source_path)
-        .replace("__SOURCE_SHA256__", &cert.source_sha256)
-        .replace("__SUBJECT_HASH__", &cert.subject_hash)
-        .replace("__SESSION_ID__", &uuid::Uuid::new_v4().simple().to_string());
+    let script = if sdk >= 34 {
+        APEX_INSTALL_SCRIPT
+    } else {
+        INSTALL_SCRIPT
+    }
+    .replace("\r\n", "\n")
+    .replace("__GAME_PACKAGE__", package)
+    .replace("__GAME_LABEL__", target::label(server))
+    .replace("__CERT_PATH__", source_path)
+    .replace("__SOURCE_SHA256__", &cert.source_sha256)
+    .replace("__SUBJECT_HASH__", &cert.subject_hash)
+    .replace("__SESSION_ID__", &uuid::Uuid::new_v4().simple().to_string());
     let result =
         shell(&root_shell(root, &script)).map_err(|error| format!("安装系统证书失败：{error}"))?;
     let result = String::from_utf8_lossy(&result);

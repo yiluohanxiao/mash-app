@@ -172,6 +172,38 @@ def test_find_rank_up_quest_rows_keeps_dark_rows_but_disables_them(size):
     assert all(row["meanLuma"] < 92 for row in result["rows"])
 
 
+@pytest.mark.parametrize("width_scales", [(1.0,), (0.8, 1.0, 1.2)])
+@pytest.mark.parametrize("alignment,expected_x", [(None, 0.55), ("center", 0.55), ("left", 0.62)])
+def test_rank_up_anchor_pair_alignment_is_independent_of_width_scales(
+    monkeypatch, width_scales, alignment, expected_x,
+):
+    from mash_cv import cv as cv_module
+
+    row_config = {"anchorWidthScales": width_scales}
+    if alignment is not None:
+        row_config["anchorPairAlignment"] = alignment
+    mash_cv._set_config({"screens": {"RankUpQuest": {"rowDetection": row_config}}})
+    image = _make_bgr_image(2560, 1440, bgr=(160, 160, 160))
+    # One title shares the cost label's left edge; the other shares its center.
+    rank_anchors = [
+        {"x": 0.62, "y": 0.30, "w": 0.18, "h": 0.04, "score": 0.9},
+        {"x": 0.55, "y": 0.30, "w": 0.18, "h": 0.04, "score": 0.9},
+    ]
+    cost_anchors = [
+        {"x": 0.62, "y": 0.368, "w": 0.04, "h": 0.03, "score": 0.9},
+    ]
+
+    def fake_matches(_image, key, _region, _threshold, **_options):
+        return rank_anchors if key == cv_module.RANK_UP_QUEST_ROW_TEMPLATE else cost_anchors
+
+    monkeypatch.setattr(cv_module, "_find_all_template_matches", fake_matches)
+    rows = cv_module._find_rank_up_quest_rows(image)["rows"]
+
+    assert len(rows) == 1
+    assert rows[0]["actionable"] is True
+    assert rows[0]["rankUpAnchor"]["x"] == pytest.approx(expected_x)
+
+
 def test_find_rank_up_quest_rows_does_not_pair_anchors_from_other_rows(monkeypatch):
     from mash_cv import cv as cv_module
 
@@ -183,7 +215,7 @@ def test_find_rank_up_quest_rows_does_not_pair_anchors_from_other_rows(monkeypat
         {"x": 0.62, "y": 0.40, "w": 0.04, "h": 0.03, "score": 0.9},
     ]
 
-    def fake_matches(_image, key, _region, _threshold):
+    def fake_matches(_image, key, _region, _threshold, **_options):
         if key == cv_module.RANK_UP_QUEST_ROW_TEMPLATE:
             return rank_anchors
         return cost_anchors
@@ -206,7 +238,7 @@ def test_find_rank_up_quest_rows_drops_top_and_bottom_clipped_rows(monkeypatch):
         {"x": 0.62, "y": 0.90, "w": 0.04, "h": 0.03, "score": 0.9},
     ]
 
-    def fake_matches(_image, key, _region, _threshold):
+    def fake_matches(_image, key, _region, _threshold, **_options):
         return [] if key == cv_module.RANK_UP_QUEST_ROW_TEMPLATE else cost_anchors
 
     monkeypatch.setattr(cv_module, "_find_all_template_matches", fake_matches)
@@ -900,6 +932,59 @@ class TestDetectScreen:
         }
         assert expected_keyword in read["servantCoinKeywords"]
         assert read["servantNameField"] == expected_name_field
+
+    @pytest.mark.parametrize("expected_level", [1, 10, 11])
+    @pytest.mark.parametrize("width", [1920, 2560])
+    def test_bond_level_reader_distinguishes_repeated_digits_in_real_captures(
+        self, monkeypatch, expected_level, width
+    ):
+        resources = Path(__file__).resolve().parents[3] / "src-tauri/resources/servers/cn"
+        mash_cv._load_templates(str(resources / "templates"))
+        mash_cv._load_config(str(resources / "cv.json"))
+        screenshot = Path(__file__).with_name("test_data") / "screenshots" / (
+            f"battle_result_bond_level_up_cn_level_{expected_level}.jpg"
+        )
+        image = cv2.imread(str(screenshot))
+        assert image is not None
+        if image.shape[1] != width:
+            image = cv2.resize(image, (width, width * 9 // 16), interpolation=cv2.INTER_CUBIC)
+        monkeypatch.setattr(
+            mash_cv.cv, "_ocr_region", lambda _img, _region: {"fragments": [], "fullText": ""}
+        )
+
+        detected = mash_cv._detect_screen(
+            image, ["Battle", "BattleResultBond", "BattleResultBondLevelUp"]
+        )
+        result = mash_cv._read_bond_level_up(image, debug=True)
+
+        assert detected["screen"] == "BattleResultBondLevelUp"
+        assert result["ok"] is True, result.get("diagnostics")
+        assert result["bondLevelAfter"] == expected_level, result.get("diagnostics")
+        assert result["confidence"]["bondLevelAfter"] >= 0.85
+
+    @pytest.mark.parametrize("server", ["cn", "jp"])
+    @pytest.mark.parametrize("level", [1, 9, 10, 11, 12, 13, 14, 15])
+    @pytest.mark.parametrize("width", [1920, 2560])
+    def test_bond_level_digits_preserve_one_and_two_digit_levels(self, server, level, width):
+        resources = Path(__file__).resolve().parents[3] / "src-tauri/resources/servers" / server
+        mash_cv._load_templates(str(resources / "templates"))
+        image = _make_bgr_image(1920, 1080)
+        region = {"x": 0.84, "y": 0.40, "w": 0.073, "h": 0.13}
+        x = round(region["x"] * 1920) + 5
+        y = round(region["y"] * 1080) + 10
+        for digit in str(level):
+            template = mash_cv._get_template(f"digit/digit_{digit}")
+            glyph = cv2.resize(template, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+            h, w = glyph.shape[:2]
+            image[y:y + h, x:x + w] = cv2.cvtColor(glyph, cv2.COLOR_GRAY2BGR)
+            x += w + 8
+        if width != 1920:
+            image = cv2.resize(image, (width, width * 9 // 16), interpolation=cv2.INTER_CUBIC)
+
+        result = mash_cv.cv._read_bond_level_after(image, region, debug=True)
+
+        assert result["found"] is True, result.get("diagnostics")
+        assert result["value"] == level, result.get("diagnostics")
 
     @pytest.mark.parametrize(
         ("server", "screenshot_rel", "expected_level", "expected_name"),
@@ -4638,7 +4723,7 @@ def test_cn_extra_class_filter_dialog_probe_rejects_closed_support_page(width):
 
 _RAPIDOCR_AVAILABLE = True
 try:
-    import rapidocr_onnxruntime  # noqa: F401
+    import rapidocr  # noqa: F401
 except Exception:  # noqa: BLE001
     _RAPIDOCR_AVAILABLE = False
 
@@ -4647,7 +4732,7 @@ _SUPPORT_SCREENSHOT = os.path.join(_TEST_SCREENSHOTS_DIR, "support_select.png")
 
 @pytest.mark.skipif(
     not _RAPIDOCR_AVAILABLE,
-    reason="rapidocr_onnxruntime not installed",
+    reason="rapidocr not installed",
 )
 @pytest.mark.skipif(
     not os.path.isfile(_SUPPORT_SCREENSHOT),
@@ -6549,6 +6634,19 @@ def test_craft_essence_scroll_end_probe_rejects_top_of_list(width):
     assert result["found"] is False
 
 
+@pytest.mark.parametrize("width", (1280, 1920, 2560))
+def test_craft_essence_scroll_end_probe_recognizes_captured_bottom_of_list(width):
+    _load_craft_essence_enhancement_assets()
+    img = _ce_enhancement_fixture("enhancement_ce_inventory_bottom_sparse.png")
+    if width != img.shape[1]:
+        img = cv2.resize(img, (width, int(img.shape[0] * width / img.shape[1])))
+
+    result = mash_cv._find_element_by_name(
+        img, "CraftEssenceEnhancement", "element_enhancement_ce_scroll_end",
+    )
+    assert result["found"], result
+
+
 @pytest.mark.parametrize("width", (1920, 2560))
 @pytest.mark.parametrize(
     ("fixture", "expected_y", "expected_at_top"),
@@ -7162,6 +7260,68 @@ def test_read_craft_essence_grid_reads_level_breaks_lock_and_art():
     )
 
 
+def test_recognize_ce_cell_levels_reads_whole_labels_at_2560px():
+    _load_craft_essence_enhancement_assets()
+    img = _ce_enhancement_fixture("enhancement_ce_inventory_strategy.png")
+    cmd = {
+        "anchorTemplateKey": "enhancement_ce/item_ce_bar_bronze",
+        "anchorTemplateReferenceWidth": 1920,
+        "region": {"x": 0.055, "y": 0.251, "w": 0.755, "h": 0.747},
+    }
+    grid = mash_cv._find_item_grid(img, cmd)
+    cells = grid["gridCells"]
+    img = cv2.resize(img, (2560, 1440))
+    levels = mash_cv.cv._recognize_ce_cell_levels(img, cells)
+    assert len(levels) == 21
+    assert [levels[index][0] for index in range(11)] == (
+        [(44, 50)] + [(11, 55)] * 2 + [(9, 55)] * 3 + [(6, 50)] * 5
+    )
+    assert all(levels[index][0] == (1, 15) for index in range(11, 21))
+
+
+def test_recognize_ce_cell_levels_requires_complete_confident_known_levels(monkeypatch):
+    reads = [
+        ("级11/55", 0.99),
+        ("等级1/15", 0.95),
+        ("等级11/55", 0.79),
+        ("等级56/55", 0.99),
+        ("等级1/99", 0.99),
+        ("1155", 0.99),
+        ("级11 1/55", 0.99),
+        ("11/55 1/55", 0.99),
+    ]
+
+    class FakeOCR:
+        def text_recognizer(self, crops):
+            assert len(crops) == len(reads)
+            assert all(crop.size for crop in crops)
+            return reads, 0.01
+
+    monkeypatch.setattr(mash_cv.cv, "_get_ocr", FakeOCR)
+    cells = [{"region": {"x": 0.1, "y": 0.2, "w": 0.1, "h": 0.2}}] * len(reads)
+    assert mash_cv.cv._recognize_ce_cell_levels(
+        np.zeros((1080, 1920, 3), dtype=np.uint8), cells
+    ) == {
+        0: ((11, 55), 0.99, "级11/55"),
+        1: ((1, 15), 0.95, "等级1/15"),
+    }
+
+
+@pytest.mark.parametrize("mode", ("missing", "failure", "short_batch"))
+def test_recognize_ce_cell_levels_preserves_detector_fallback(monkeypatch, mode):
+    class FakeOCR:
+        def text_recognizer(self, _crops):
+            if mode == "failure":
+                raise RuntimeError("worker failed")
+            return [], 0.01
+
+    monkeypatch.setattr(mash_cv.cv, "_get_ocr", lambda: None if mode == "missing" else FakeOCR())
+    cells = [{"region": {"x": 0.1, "y": 0.2, "w": 0.1, "h": 0.2}}]
+    assert mash_cv.cv._recognize_ce_cell_levels(
+        np.zeros((1080, 1920, 3), dtype=np.uint8), cells
+    ) == {}
+
+
 def test_read_craft_essence_material_grid_never_marks_unlocked_food_as_locked():
     _load_craft_essence_enhancement_assets()
     img = _ce_enhancement_fixture("enhancement_ce_select_exp.png")
@@ -7234,7 +7394,7 @@ def test_read_craft_essence_material_grid_marks_only_same_target_food():
         and cell["levelCap"] == 10
         and cell["rarity"] == 1
         and not cell["locked"]
-        and cell["sameAsTargetText"] == "突破板限"
+        and cell["sameAsTargetText"] == "突破极限"
         and cell["sameAsTargetConfidence"]
         >= result["diagnostics"]["sameTargetOcrMinConfidence"]
         and cell["sameAsTargetScore"]
@@ -7309,3 +7469,14 @@ def test_read_craft_essence_grid_drops_clipped_rows_during_scroll(fixture):
         and not cell["locked"]
         for cell in result["cells"]
     )
+
+
+def test_bond_servant_match_prefers_exact_variant_over_perfect_substring(monkeypatch):
+    from mash_cv import cv
+    monkeypatch.setattr(cv, "_load_servant_catalog", lambda: [
+        {"nameCN": "贞德〔Alter〕", "id": 1},
+        {"nameCN": "贞德·Alter·Santa·Lily", "id": 2},
+    ])
+    result = cv._best_servant_match("贞德·Alter·Santa·Lily", "nameCN")
+    assert result["id"] == 2
+    assert result["score"] == 1.0

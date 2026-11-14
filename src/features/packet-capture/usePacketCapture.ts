@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { CaptureHistoryState, CaptureRecord, PacketCaptureWorkspace } from "../../types/packetCapture";
+import type { CaptureAuthorizationPrompt, CaptureAppList, CaptureClientContext, CaptureHistoryState, CaptureRecord, PacketCaptureWorkspace } from "../../types/packetCapture";
 import { listen, type UnlistenFn } from "../../tauri";
-import { copyPacketCaptureResponse, deletePacketCaptureRecord, exportPacketCaptureResponse, getPacketCaptureWorkspace, selectPacketCaptureRecord, setupPacketCapture, startPacketCapture, stopPacketCapture } from "./packetCaptureApi";
+import { getPacketCaptureAuthorization, submitPacketCaptureApiKey, getPacketCaptureApps, selectPacketCaptureApp, copyPacketCaptureResponse, deletePacketCaptureRecord, exportPacketCaptureResponse, getPacketCaptureWorkspace, selectPacketCaptureRecord, setupPacketCapture, startPacketCapture, stopPacketCapture } from "./packetCaptureApi";
 
 type Operation = "setup" | "start" | "stop" | "delete" | "copy" | "export";
 const pendingMessages: Partial<Record<Operation, string>> = {
@@ -12,6 +12,17 @@ const pendingMessages: Partial<Record<Operation, string>> = {
 };
 
 export function usePacketCapture() {
+  const [authorization, setAuthorization] = useState<CaptureAuthorizationPrompt | null>(null);
+  const [clients, setClients] = useState<CaptureAppList | null>(null);
+  const [clientOperation, setClientOperation] = useState<"load" | "select" | null>(null);
+  const [clientError, setClientError] = useState<string | null>(null);
+  const clientInFlight = useRef(false);
+  const clientCompletion = useRef<Promise<void> | null>(null);
+  const clientGeneration = useRef(0);
+  const clientSnapshot = useRef<CaptureAppList | null>(null);
+  const clientContextStale = useRef(false);
+  const clientRefreshPending = useRef(true);
+  const [clientContextVersion, setClientContextVersion] = useState(0);
   const [workspace, setWorkspace] = useState<PacketCaptureWorkspace | null>(null);
   const [operation, setOperation] = useState<Operation | null>(null);
   const [completedOperationGeneration, setCompletedOperationGeneration] = useState(0);
@@ -21,8 +32,8 @@ export function usePacketCapture() {
   const [readError, setReadError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [exported, setExported] = useState(false);
-  const [setupMessage, setSetupMessage] = useState<string | null>(null);
-  const setupUnlisten = useRef<UnlistenFn | null>(null);
+  const [progressMessage, setProgressMessage] = useState<string | null>(null);
+  const progressUnlisten = useRef<UnlistenFn | null>(null);
   const inFlight = useRef<Operation | null>(null);
   const requestGeneration = useRef(0);
   const mounted = useRef(false);
@@ -51,10 +62,46 @@ export function usePacketCapture() {
     mounted.current = true;
     return () => {
       mounted.current = false;
-      setupUnlisten.current?.();
-      setupUnlisten.current = null;
+      progressUnlisten.current?.();
+      progressUnlisten.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const subscription = listen("packet-capture-context-changed", () => {
+      if (cancelled) return;
+      // Invalidate pending discovery too: its reply belongs to the old context.
+      clientGeneration.current++;
+      clientSnapshot.current = null;
+      clientContextStale.current = true;
+      clientRefreshPending.current = true;
+      setClients(null);
+      setClientError(null);
+      setResult("");
+      setClientContextVersion(version => version + 1);
+    });
+    void subscription.catch(error => { if (!cancelled) setClientError(String(error)); });
+    return () => { cancelled = true; void subscription.then(unlisten => unlisten(), () => {}); };
+  }, []);
+
+  useEffect(() => {
+    if (operation !== "start") { setAuthorization(null); return; }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      try {
+        const prompt = await getPacketCaptureAuthorization();
+        if (!cancelled) setAuthorization(prompt);
+      } catch {
+        // The start operation remains authoritative; a failed status read is retried.
+      } finally {
+        if (!cancelled) timer = setTimeout(() => void refresh(), 500);
+      }
+    };
+    void refresh();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [operation]);
 
   useEffect(() => {
     if (operation !== null) return;
@@ -69,7 +116,7 @@ export function usePacketCapture() {
         setWorkspace(next);
         setAwaitingCaptureStatus(false);
         setReadError(null);
-        if (next.capture.phase === "waiting") timer = setTimeout(() => void refresh(), 1000);
+        if (next.capture.phase === "waiting") timer = setTimeout(() => void refresh(), next.capture.retryAfterMs);
       } catch (error) {
         if (cancelled) return;
         setReadError(String(error));
@@ -116,21 +163,26 @@ export function usePacketCapture() {
   const perform = async (action: Operation, request: (isCurrent: () => boolean) => Promise<void>) => {
     if (inFlight.current && !(action === "stop" && inFlight.current !== "stop"
       && (inFlight.current === "setup" || inFlight.current === "start" || hasCaptureTask))) return;
+    const pendingClientRequest = action === "setup" || action === "start" ? clientCompletion.current : null;
     const generation = ++requestGeneration.current;
     const isCurrent = () => mounted.current && generation === requestGeneration.current;
     resumePollingOnly.current = false;
     inFlight.current = action;
     if (action === "stop") {
-      setupUnlisten.current?.();
-      setupUnlisten.current = null;
+      progressUnlisten.current?.();
+      progressUnlisten.current = null;
     }
     setOperation(action);
     setError(null);
     setResult("");
     setCopied(false);
     setExported(false);
-    setSetupMessage(null);
+    setProgressMessage(null);
     try {
+      // Device actions wait for an ongoing client query to release its backend
+      // device lease. Merely opening the dropdown does not disable the page.
+      if (pendingClientRequest) await pendingClientRequest;
+      if (!isCurrent()) return;
       await request(isCurrent);
       if (isCurrent() && readError === null && !awaitingCaptureStatus) resumePollingOnly.current = action === "delete" || action === "copy" || action === "export";
     } catch (error) {
@@ -153,40 +205,96 @@ export function usePacketCapture() {
       setWorkspace(previous => previous && { ...previous, history });
     }
   };
+  const performWithProgress = (action: "setup" | "start", request: (isCurrent: () => boolean) => Promise<void>) => perform(action, async isCurrent => {
+    let active = true;
+    // Subscribe before invoke so an immediate device prompt is not missed.
+    const unlisten = await listen<string>(`packet-capture-${action}-progress`, event => {
+      if (active && isCurrent()) setProgressMessage(event.payload);
+    });
+    if (!isCurrent()) { active = false; unlisten(); return; }
+    progressUnlisten.current = unlisten;
+    try {
+      await request(isCurrent);
+    } finally {
+      active = false;
+      if (progressUnlisten.current === unlisten) {
+        progressUnlisten.current = null;
+        unlisten();
+      }
+      if (isCurrent()) setProgressMessage(null);
+    }
+  });
+  // Client discovery and selection only update the picker. Keeping them outside
+  // the capture operation avoids disabling navigation, clearing feedback, or
+  // restarting workspace reads whenever the dropdown opens.
+  const performClientRequest = useCallback(async (action: "load" | "select", request: () => Promise<CaptureAppList>) => {
+    if (clientInFlight.current || inFlight.current || hasCaptureTask || awaitingCaptureStatus) return false;
+    const generation = ++clientGeneration.current;
+    const isCurrent = () => mounted.current && generation === clientGeneration.current;
+    clientInFlight.current = true;
+    let complete!: () => void;
+    const completion = new Promise<void>(resolve => { complete = resolve; });
+    clientCompletion.current = completion;
+    setClientOperation(action);
+    setClientError(null);
+    try {
+      const next = await request();
+      if (!isCurrent()) return false;
+      clientSnapshot.current = next;
+      clientContextStale.current = false;
+      setClients(next);
+      return true;
+    } catch (error) {
+      if (isCurrent()) setClientError(String(error));
+      return false;
+    } finally {
+      clientInFlight.current = false;
+      if (mounted.current) setClientOperation(null);
+      if (clientCompletion.current === completion) clientCompletion.current = null;
+      complete();
+    }
+  }, [hasCaptureTask, awaitingCaptureStatus]);
+
+  useEffect(() => {
+    // Wait for the old query/operation to release its device lease before reload.
+    if (!workspace || !clientRefreshPending.current || operation || clientOperation || hasCaptureTask || awaitingCaptureStatus) return;
+    clientRefreshPending.current = false;
+    void performClientRequest("load", getPacketCaptureApps);
+  }, [workspace, clientContextVersion, operation, clientOperation, hasCaptureTask, awaitingCaptureStatus, performClientRequest]);
+
+  const currentClientContext = (): CaptureClientContext | undefined => {
+    if (clientContextStale.current) throw new Error("客户端信息已变更，请刷新客户端列表后重试");
+    const list = clientSnapshot.current;
+    return list ? { serial: list.serial, server: list.server, selectedPackage: list.selectedPackage } : undefined;
+  };
   const captureError = workspace?.capture.phase === "error" ? workspace.capture.message : null;
   const selected = detail.id === selectedId ? detail.record : null;
   const detailError = detail.id === selectedId ? detail.error : null;
   const initialLoading = workspace === null && readError === null;
   const recordLoading = selectedId !== null && selected === null && detailError === null;
   return {
-    workspace, operation, capturing, copied, exported, selectedId, selected, initialLoading, recordLoading, recordError: detailError,
+    workspace, authorization: operation === "start" ? authorization : null, submitApiKey: submitPacketCaptureApiKey, clients, clientOperation, clientError, clientBusy: clientOperation !== null, operation, capturing, copied, exported, selectedId, selected, initialLoading, recordLoading, recordError: detailError,
     canStop: hasCaptureTask || awaitingCaptureStatus || operation === "setup" || operation === "start" || operation === "stop",
     navigationLocked: initialLoading || operation !== null || hasCaptureTask || awaitingCaptureStatus,
     busy: operation !== null,
     error: error || (operation === null ? detailError || readError || captureError : null),
-    message: (operation === "setup" && setupMessage) || (operation && pendingMessages[operation]) || workspace?.capture.message || result,
-    setup: () => perform("setup", async isCurrent => {
-      let active = true;
-      // Subscribe before starting: first-run prompts may arrive before invoke resolves.
-      const unlisten = await listen<string>("packet-capture-setup-progress", event => {
-        if (active && isCurrent()) setSetupMessage(event.payload);
-      });
-      if (!isCurrent()) { active = false; unlisten(); return; }
-      setupUnlisten.current = unlisten;
-      try {
-        const response = await setupPacketCapture();
-        if (isCurrent()) setResult(response.message);
-      } finally {
-        active = false;
-        if (setupUnlisten.current === unlisten) {
-          setupUnlisten.current = null;
-          unlisten();
-        }
-        if (isCurrent()) setSetupMessage(null);
+    message: ((operation === "setup" || operation === "start") && progressMessage) || (operation && pendingMessages[operation]) || workspace?.capture.message || result,
+    loadClients: () => performClientRequest("load", getPacketCaptureApps),
+    chooseClient: async (packageName: string) => {
+      if (!clients) return false;
+      const chosen = await performClientRequest("select", () => selectPacketCaptureApp(clients, packageName));
+      if (chosen && mounted.current) {
+        setError(null);
+        setResult("已选择客户端，请重新进行环境配置");
       }
+      return chosen;
+    },
+    setup: () => performWithProgress("setup", async isCurrent => {
+      const response = await setupPacketCapture(currentClientContext());
+      if (isCurrent()) setResult(response.message);
     }),
-    start: () => perform("start", async isCurrent => {
-      const response = await startPacketCapture();
+    start: () => performWithProgress("start", async isCurrent => {
+      const response = await startPacketCapture(currentClientContext());
       if (isCurrent()) {
         setResult(response.message);
         // Keep navigation locked until the first post-start workspace read.

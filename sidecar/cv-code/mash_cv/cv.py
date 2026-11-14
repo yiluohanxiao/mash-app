@@ -1467,6 +1467,42 @@ def _best_ce_level_read(ocr: dict) -> tuple[Optional[tuple[int, int]], float, st
     return level_read, level_confidence, level_text
 
 
+def _recognize_ce_cell_levels(img: np.ndarray, cells: list[dict]) -> dict:
+    """Read whole fixed labels without detector splits losing narrow digits.
+
+    PP-OCRv6 can split ``11/55`` into overlapping ``级11`` and ``1/55``
+    boxes, or miss a label entirely. The grid anchors already locate each
+    label, so recognize these crops in one batch before detector fallbacks.
+    Require a complete slash-separated read and a known cap at >=0.80.
+    """
+    if not cells or not img.size:
+        return {}
+    recognizer = getattr(_get_ocr(), "text_recognizer", None)
+    if not callable(recognizer):
+        return {}
+    h, w = img.shape[:2]
+    crops = []
+    for cell in cells:
+        x, y, rw, rh = _slot_to_pixels(_ce_cell_level_region(cell["region"]), w, h)
+        crops.append(img[y : y + rh, x : x + rw])
+    try:
+        reads, _elapsed = recognizer(crops)
+    except Exception:  # noqa: BLE001 - retain detector fallbacks
+        return {}
+    if len(reads) != len(cells):
+        return {}
+    levels = {}
+    for index, (text, confidence) in enumerate(reads):
+        text = str(text).strip()
+        confidence = float(confidence or 0.0)
+        if not re.fullmatch(r"\D*\d{1,3}[/／]\d{1,3}", text) or confidence < 0.80:
+            continue
+        parsed = _parse_ce_level_text(text)
+        if parsed is not None:
+            levels[index] = (parsed, confidence, text)
+    return levels
+
+
 def _ce_cell_lock_region(cell_region: dict) -> dict:
     return _clamp_norm_rect(
         {
@@ -1652,14 +1688,18 @@ def _read_craft_essence_grid(img: np.ndarray, cmd: dict) -> dict:
     ]
     lock_template = _get_template(CE_GRID_LOCK_TEMPLATE)
     grid_ocr = _ocr_region(img, list_region)
+    direct_levels = _recognize_ce_cell_levels(img, cells)
     output_cells: list[dict] = []
     invalid_cells = 0
 
-    for cell in cells:
+    for index, cell in enumerate(cells):
         region = cell["region"]
         level_region = _ce_cell_level_region(region)
-        ocr = _ocr_region(img, level_region)
-        level_read, level_confidence, level_text = _best_ce_level_read(ocr)
+        if index in direct_levels:
+            level_read, level_confidence, level_text = direct_levels[index]
+        else:
+            ocr = _ocr_region(img, level_region)
+            level_read, level_confidence, level_text = _best_ce_level_read(ocr)
         if level_read is None:
             fallback_region = _ce_cell_level_fallback_region(region)
             for scale in (1.5, 2.5):
@@ -1887,6 +1927,7 @@ def _find_all_template_matches(
     template_key: str,
     region: dict,
     threshold: float,
+    width_scales: tuple[float, ...] = (1.0,),
 ) -> list[dict]:
     """Return vertically distinct matches for one static UI label."""
     tmpl = _get_template(template_key)
@@ -1900,33 +1941,40 @@ def _find_all_template_matches(
     if crop.size == 0:
         return []
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
-    th, tw = tmpl.shape[:2]
-    if tw > gray.shape[1] or th > gray.shape[0]:
-        return []
-
-    result = cv2.matchTemplate(gray, tmpl, cv2.TM_CCOEFF_NORMED)
     matches: list[dict] = []
-    while True:
-        _, max_val, _, max_loc = cv2.minMaxLoc(result)
-        score = float(max_val)
-        if score < threshold:
-            break
-        x, y = max_loc
-        matches.append(
-            {
-                "x": (rx + x) / w,
-                "y": (ry + y) / h,
-                "w": tw / w,
-                "h": th / h,
-                "score": score,
-            }
+    for scale in width_scales:
+        th, base_w = tmpl.shape[:2]
+        tw = max(1, round(base_w * scale))
+        if tw > gray.shape[1] or th > gray.shape[0]:
+            continue
+        scaled = tmpl if tw == base_w else cv2.resize(
+            tmpl, (tw, th),
+            interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC,
         )
-        x0 = max(0, x - tw // 2)
-        y0 = max(0, y - th)
-        x1 = min(result.shape[1], x + tw // 2)
-        y1 = min(result.shape[0], y + th)
-        result[y0:y1, x0:x1] = -1.0
-    return sorted(matches, key=lambda match: (match["y"], match["x"]))
+        result = cv2.matchTemplate(gray, scaled, cv2.TM_CCOEFF_NORMED)
+        while True:
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+            score = float(max_val)
+            if score < threshold:
+                break
+            x, y = max_loc
+            matches.append({
+                "x": (rx + x) / w, "y": (ry + y) / h,
+                "w": tw / w, "h": th / h, "score": score,
+            })
+            x0 = max(0, x - tw // 2)
+            y0 = max(0, y - th)
+            x1 = min(result.shape[1], x + tw // 2)
+            y1 = min(result.shape[0], y + th)
+            result[y0:y1, x0:x1] = -1.0
+    if len(width_scales) == 1:
+        return sorted(matches, key=lambda match: (match["y"], match["x"]))
+    # Different title widths can match the same row. Keep its strongest match.
+    distinct: list[dict] = []
+    for match in sorted(matches, key=lambda match: match["score"], reverse=True):
+        if not any(abs(match["y"] - other["y"]) < match["h"] for other in distinct):
+            distinct.append(match)
+    return sorted(distinct, key=lambda match: (match["y"], match["x"]))
 
 
 def _rank_up_quest_row_color_stats(img: np.ndarray, row: dict) -> tuple[float, float, float]:
@@ -1952,11 +2000,15 @@ def _rank_up_quest_row_color_stats(img: np.ndarray, row: dict) -> tuple[float, f
 
 
 def _find_rank_up_quest_rows(img: np.ndarray) -> dict:
+    row_config = config.get("screens", {}).get("RankUpQuest", {}).get("rowDetection", {})
+    width_scales = tuple(row_config.get("anchorWidthScales", (1.0,)))
+    pair_by_left_edge = row_config.get("anchorPairAlignment", "center") == "left"
     rank_anchors = _find_all_template_matches(
         img,
         RANK_UP_QUEST_ROW_TEMPLATE,
         RANK_UP_QUEST_LIST_REGION,
         RANK_UP_QUEST_ANCHOR_THRESHOLD,
+        width_scales=width_scales,
     )
     cost_anchors = _find_all_template_matches(
         img,
@@ -1974,7 +2026,7 @@ def _find_rank_up_quest_rows(img: np.ndarray) -> dict:
                 continue
             rank_cx = rank["x"] + rank["w"] / 2.0
             dy = cost["y"] - rank["y"]
-            dx = abs(cost_cx - rank_cx)
+            dx = abs(cost["x"] - rank["x"]) if pair_by_left_edge else abs(cost_cx - rank_cx)
             if not (RANK_UP_QUEST_PAIR_DY_MIN <= dy <= RANK_UP_QUEST_PAIR_DY_MAX):
                 continue
             if dx > RANK_UP_QUEST_PAIR_DX_MAX:
@@ -2836,29 +2888,41 @@ def _bond_level_digit_candidates(img: np.ndarray, region: dict) -> tuple[list[di
 
     candidates: list[dict] = []
     for digit, tmpl in refs:
-        match = _match_template_region_multiscale(
-            img,
-            tmpl,
-            region,
-            0.0,
-            scales=BOND_LEVEL_TEMPLATE_SCALES,
-        )
-        if match["score"] < BOND_LEVEL_DIGIT_THRESHOLD:
-            continue
-        if not match.get("region") or float(match["region"]["h"]) < BOND_LEVEL_DIGIT_MIN_HEIGHT:
-            continue
-        candidates.append(
-            {
-                "digit": digit,
-                "score": float(match["score"]),
-                "x": float(match["region"]["x"]),
-                "y": float(match["region"]["y"]),
-                "w": float(match["region"]["w"]),
-                "h": float(match["region"]["h"]),
-                "region": match["region"],
-                "scale": float(match.get("scale", 1.0)),
-            }
-        )
+        pending_regions = [region]
+        while pending_regions:
+            search_region = pending_regions.pop()
+            match = _match_template_region_multiscale(
+                img,
+                tmpl,
+                search_region,
+                BOND_LEVEL_DIGIT_THRESHOLD,
+                scales=BOND_LEVEL_TEMPLATE_SCALES,
+            )
+            if not match["found"]:
+                continue
+            matched_region = match["region"]
+            if float(matched_region["h"]) < BOND_LEVEL_DIGIT_MIN_HEIGHT:
+                continue
+            candidates.append(
+                {
+                    "digit": digit,
+                    "score": float(match["score"]),
+                    "x": float(matched_region["x"]),
+                    "y": float(matched_region["y"]),
+                    "w": float(matched_region["w"]),
+                    "h": float(matched_region["h"]),
+                    "region": matched_region,
+                    "scale": float(match.get("scale", 1.0)),
+                }
+            )
+            # Exclude this glyph and search both sides for repeated digits such as 11.
+            left_width = float(matched_region["x"]) - float(search_region["x"])
+            if left_width > 0:
+                pending_regions.append({**search_region, "w": left_width})
+            right_x = float(matched_region["x"]) + float(matched_region["w"])
+            right_width = float(search_region["x"]) + float(search_region["w"]) - right_x
+            if right_width > 0:
+                pending_regions.append({**search_region, "x": right_x, "w": right_width})
     return candidates, []
 
 
@@ -2985,7 +3049,15 @@ def _best_servant_match(candidate_text: str, name_field: str) -> dict:
             name = servant.get("nameCNServer")
         if not name:
             continue
-        score = _fuzzy_score(candidate, _bond_normalize_text(str(name)))
+        normalized_name = _bond_normalize_text(str(name))
+        score = _fuzzy_score(candidate, normalized_name)
+        # A substring can also score 1.0. Prefer a complete exact name over
+        # an earlier catalog entry for a shorter servant variant.
+        if candidate == normalized_name:
+            return {
+                "name": str(name), "id": servant.get("id"),
+                "collectionNo": servant.get("collectionNo"), "score": 1.0,
+            }
         if score > float(best["score"]):
             best = {
                 "name": str(name),
@@ -4929,7 +5001,7 @@ def _ocr_region(img: np.ndarray, region: dict, *, scale: float = 1.0) -> dict:
         return {
             "fragments": [],
             "fullText": "",
-            "error": "rapidocr_onnxruntime not available",
+            "error": "RapidOCR not available",
         }
 
     scale = max(1.0, float(scale))
@@ -5248,7 +5320,7 @@ def _find_supports(
         return {
             "supports": [],
             "diagnostics": diag,
-            "error": "rapidocr_onnxruntime not available",
+            "error": "RapidOCR not available",
         }
 
     used_anchor_row_ocr = False

@@ -22,6 +22,7 @@ const SETTINGS: RecognitionSettings = {
   enableExtraClassFilter: true,
   supportFullListOcrFallback: false,
   unknownScreenTimeoutCount: 100,
+  apRecoveryConfirmWaitMs: 1000,
 };
 
 describe("SettingsBasicPage", () => {
@@ -35,18 +36,18 @@ describe("SettingsBasicPage", () => {
     });
     const change = vi.fn(); const user = userEvent.setup();
     const { unmount } = renderWithTheme(<SettingsBasicPage active onSkillEditorLayoutChange={change} />);
-    await user.click(await screen.findByRole("combobox", { name: "技能设置布局" }));
-    await user.click(screen.getByRole("option", { name: "简易设置" }));
+    await user.click(await screen.findByRole("combobox", { name: "技能设置" }));
+    await user.click(screen.getByRole("option", { name: "简易模式（Chaldea 模式）" }));
     await waitFor(() => expect(change).toHaveBeenCalledWith("simple"));
     expect(invoke).toHaveBeenCalledWith("set_skill_editor_layout", { value: "simple" });
     unmount();
     renderWithTheme(<SettingsBasicPage active onSkillEditorLayoutChange={change} />);
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "技能设置布局" })).toHaveTextContent("简易设置"));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "技能设置" })).toHaveTextContent("简易模式（Chaldea 模式）"));
     vi.mocked(invoke).mockImplementation(async () => { throw new Error("保存失败"); });
-    await user.click(screen.getByRole("combobox", { name: "技能设置布局" }));
-    await user.click(screen.getByRole("option", { name: "逐步设置" }));
+    await user.click(screen.getByRole("combobox", { name: "技能设置" }));
+    await user.click(screen.getByRole("option", { name: "经典模式" }));
     expect(await screen.findByText("Error: 保存失败")).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "技能设置布局" })).toHaveTextContent("简易设置");
+    expect(screen.getByRole("combobox", { name: "技能设置" })).toHaveTextContent("简易模式（Chaldea 模式）");
     expect(change).toHaveBeenCalledTimes(1);
   });
 
@@ -55,7 +56,7 @@ describe("SettingsBasicPage", () => {
     const retry = vi.fn().mockResolvedValue(undefined);
     const user = userEvent.setup();
     renderWithTheme(<SettingsBasicPage active colorThemeError="主题配色读取失败，请重试。" onColorThemeReload={retry} />);
-    expect(screen.getByRole("combobox", { name: "主题配色" })).toHaveTextContent("读取失败");
+    expect(screen.getByRole("combobox", { name: "主题" })).toHaveTextContent("读取失败");
     expect(screen.getByRole("alert")).toHaveTextContent("主题配色读取失败，请重试。");
     expect(screen.queryByText("正在读取…")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重试" }));
@@ -72,13 +73,13 @@ describe("SettingsBasicPage", () => {
     const change = vi.fn().mockResolvedValue(undefined);
     const user = userEvent.setup();
     renderWithTheme(<SettingsBasicPage active colorTheme="violet" onColorThemeChange={change} />);
-    await user.click(screen.getByRole("combobox", { name: "主题配色" }));
+    await user.click(screen.getByRole("combobox", { name: "主题" }));
     await user.click(screen.getByRole("option", { name: label }));
     if (value !== "violet") {
       expect(change).toHaveBeenCalledWith(value);
       expect(await screen.findByText("已保存")).toBeInTheDocument();
     } else {
-      expect(screen.getByRole("combobox", { name: "主题配色" })).toHaveTextContent("紫色");
+      expect(screen.getByRole("combobox", { name: "主题" })).toHaveTextContent("紫色");
     }
   });
 
@@ -88,7 +89,7 @@ describe("SettingsBasicPage", () => {
     const change = vi.fn(() => new Promise<void>((_, reject) => { fail = reject; }));
     const user = userEvent.setup();
     renderWithTheme(<SettingsBasicPage active colorTheme="violet" onColorThemeChange={change} />);
-    const select = screen.getByRole("combobox", { name: "主题配色" });
+    const select = screen.getByRole("combobox", { name: "主题" });
     await user.click(select);
     await user.click(screen.getByRole("option", { name: "香槟金" }));
     expect(select).toBeDisabled();
@@ -109,39 +110,11 @@ describe("SettingsBasicPage", () => {
     renderWithTheme(<SettingsBasicPage active />);
 
     expect(await screen.findByRole("combobox", {
-      name: "御主礼装显示性别",
+      name: "御主性别",
     })).toBeInTheDocument();
     expect(screen.queryByRole("switch", {
       name: "自动申请好友",
     })).not.toBeInTheDocument();
-  });
-
-  it("persists the full-list support OCR fallback toggle", async () => {
-    const user = userEvent.setup();
-    vi.mocked(invoke).mockImplementation(async (command, args) => {
-      if (command === "get_recognition_settings") return SETTINGS;
-      if (command === "set_support_full_list_ocr_fallback") {
-        expect(args).toEqual({ value: true });
-        return { ...SETTINGS, supportFullListOcrFallback: true };
-      }
-      return SETTINGS;
-    });
-
-    renderWithTheme(<SettingsBasicPage active />);
-
-    const fallback = await screen.findByRole("switch", {
-      name: "使用全列表 OCR",
-    });
-    expect(fallback).not.toBeChecked();
-
-    await user.click(fallback);
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("set_support_full_list_ocr_fallback", {
-        value: true,
-      });
-    });
-    expect(fallback).toBeChecked();
   });
 
   it("persists the panel opened after battle automation starts", async () => {
@@ -165,7 +138,7 @@ describe("SettingsBasicPage", () => {
     );
 
     const panelSelect = await screen.findByRole("combobox", {
-      name: "开始后展开",
+      name: "自动展开",
     });
     expect(panelSelect).toHaveTextContent("操作日志");
 

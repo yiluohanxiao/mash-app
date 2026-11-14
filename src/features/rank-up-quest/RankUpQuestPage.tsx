@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Box, Button, Flex, Select, Text } from "@radix-ui/themes";
-import { ChevronLeftIcon, ReloadIcon } from "@radix-ui/react-icons";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import { Box, Button, Flex, Text } from "@radix-ui/themes";
+import { ImageIcon, ReloadIcon } from "@radix-ui/react-icons";
 import { OptionCardRadioGroup } from "../../components/common/OptionCardRadioGroup";
+import { PageHeader } from "../../components/common/PageHeader";
 import { SectionHeading } from "../../components/common/SectionHeading";
+import { FooterNote } from "../../components/common/FooterNote";
+import { TaskActionButton } from "../../components/common/TaskActionButton";
 import { convertFileSrc, invoke, listen } from "../../tauri";
-import type { Project } from "../../types/project";
+import { ProjectBar } from "../projects/ProjectBar";
 import type { Server } from "../../types/server";
 import type {
   RankUpQuestCaptureResult,
@@ -20,10 +23,8 @@ interface AutomationEvent {
   message: string;
 }
 
-interface RankUpQuestPageProps {
-  projects: Project[];
-  activeProjectId: string | null;
-  onProjectSelect: (id: string) => void;
+interface RankUpQuestPageProps extends Omit<ComponentProps<typeof ProjectBar>, "disabled" | "headerStyle"> {
+  server: Server | null;
   onBack: () => void;
   onAutomationStart?: () => void;
   onAutomationStartFailed?: () => void;
@@ -39,32 +40,37 @@ function rowStyle(row: RankUpQuestRow) {
   };
 }
 
-export function RankUpQuestPage({
+export function RankUpQuestPage(props: RankUpQuestPageProps) {
+  const [mode, setMode] = useState<RankUpQuestMode>("single");
+  return <RankUpQuestServerPage key={props.server ?? "loading"} {...props} mode={mode} setMode={setMode} />;
+}
+
+function RankUpQuestServerPage({
+  server,
   projects,
   activeProjectId,
-  onProjectSelect,
   onBack,
   onAutomationStart,
   onAutomationStartFailed,
   onLogEntry,
-}: RankUpQuestPageProps) {
-  const [mode, setMode] = useState<RankUpQuestMode>("single");
-  const [server, setServer] = useState<Server | null>(null);
+  mode,
+  setMode,
+  ...projectBarProps
+}: RankUpQuestPageProps & { mode: RankUpQuestMode; setMode: (mode: RankUpQuestMode) => void }) {
   const [capture, setCapture] = useState<RankUpQuestCaptureResult | null>(null);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
   const [capturing, setCapturing] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [currentScreen, setCurrentScreen] = useState("");
+  const captureRequest = useRef(0);
+
+  useEffect(() => () => { captureRequest.current += 1; }, []);
 
   const selectedProject = useMemo(
-    () => projects.find((project) => project.id === activeProjectId) ?? projects[0] ?? null,
+    () => projects.find((project) => project.id === activeProjectId) ?? null,
     [activeProjectId, projects],
   );
-
-  useEffect(() => {
-    invoke<Server>("get_server").then(setServer).catch((value) => setError(String(value)));
-  }, []);
 
   useEffect(() => {
     const unlisten = listen<AutomationEvent>("automation-status", (event) => {
@@ -79,20 +85,26 @@ export function RankUpQuestPage({
   }, []);
 
   const capturePage = useCallback(() => {
+    const request = ++captureRequest.current;
     setCapturing(true);
     setError(null);
     setSelectedCandidateId(null);
     invoke<RankUpQuestCaptureResult>("capture_rank_up_quest_page")
-      .then(setCapture)
+      .then((result) => {
+        if (request === captureRequest.current) setCapture(result);
+      })
       .catch((value) => {
+        if (request !== captureRequest.current) return;
         setCapture(null);
         setError(String(value));
       })
-      .finally(() => setCapturing(false));
+      .finally(() => {
+        if (request === captureRequest.current) setCapturing(false);
+      });
   }, []);
 
   const handleStart = useCallback(() => {
-    if (!selectedProject || server !== "CN") return;
+    if (!selectedProject || server == null) return;
     if (mode === "single" && (!capture || !selectedCandidateId)) return;
     if (
       selectedProject.apRecoveryItems?.includes("rainbow") &&
@@ -137,30 +149,32 @@ export function RankUpQuestPage({
   const canStart =
     !running &&
     !capturing &&
-    server === "CN" &&
+    server != null &&
     selectedProject != null &&
     (mode === "all" || (capture != null && selectedCandidateId != null));
 
+  const statusError = error;
+  const statusMessage = statusError
+    || (server == null ? "正在读取服务器…"
+      : capturing ? "正在截取游戏画面…"
+      : running ? `当前页面：${currentScreen || "正在启动"}`
+      : !selectedProject ? projects.length === 0 ? "请先创建战斗队伍" : "请选择战斗队伍"
+      : mode === "all" ? "就绪，将按列表顺序执行"
+      : selectedCandidateId ? "已选择强化任务，可以开始"
+      : "请截图并选择强化任务");
+
   return (
-    <Flex direction="column" className="battle-page rank-up-quest-page">
-      <Flex align="center" gap="3" className="battle-header">
-        <Button variant="soft" color="gray" onClick={onBack} disabled={running}>
-          <ChevronLeftIcon width={16} height={16} />
-          <Text size="2">返回</Text>
-        </Button>
-        <Text size="4" weight="bold">强化任务</Text>
-      </Flex>
+    <main className="main-content-inner workspace-page battle-page rank-up-quest-page" aria-label="强化任务">
+      <PageHeader title="强化任务" english="RANK UP QUEST" onBack={onBack} backDisabled={running}>
+        <ProjectBar {...projectBarProps} projects={projects} activeProjectId={activeProjectId} headerStyle disabled={running} />
+      </PageHeader>
 
-      <Flex direction="column" gap="4" className="battle-body battle-body-scroll">
-        {server === "JP" && (
-          <Box className="rank-up-quest-notice">
-            <Text size="2" color="red">强化任务自动化首版仅支持国服。</Text>
-          </Box>
-        )}
-
+      <Flex direction="column" className="battle-body battle-body-scroll">
         <Box className="battle-panel">
-          <SectionHeading>完成方式</SectionHeading>
+          <SectionHeading rail stacked english="MODE">完成方式</SectionHeading>
           <OptionCardRadioGroup
+            indicator="diamond"
+            className="battle-repeat-cards rank-up-quest-modes"
             value={mode}
             disabled={running}
             onValueChange={(value) => setMode(value as RankUpQuestMode)}
@@ -177,36 +191,21 @@ export function RankUpQuestPage({
               },
             ]}
           />
-        </Box>
-
-        <Box className="battle-panel">
-          <SectionHeading>战斗队伍</SectionHeading>
-          <Select.Root
-            value={selectedProject?.id ?? ""}
-            onValueChange={onProjectSelect}
-            disabled={running || projects.length === 0}
-          >
-            <Select.Trigger placeholder="选择队伍" className="rank-up-quest-team-select" />
-            <Select.Content>
-              {projects.map((project) => (
-                <Select.Item key={project.id} value={project.id}>{project.name}</Select.Item>
-              ))}
-            </Select.Content>
-          </Select.Root>
           <Text size="1" color="gray" className="rank-up-quest-help">
-            沿用该队伍的助战条件、战斗指令和行动力恢复设置；忽略普通重复次数。
+            沿用所选队伍的助战条件、战斗指令和行动力恢复设置；忽略普通重复次数。
           </Text>
         </Box>
 
         {mode === "single" && (
           <Box className="battle-panel">
-            <Flex align="center" justify="between" gap="3">
-              <SectionHeading>选择强化任务</SectionHeading>
+            <Flex align="center" justify="between" gap="3" className="rank-up-quest-capture-header">
+              <SectionHeading rail stacked english="QUEST">选择强化任务</SectionHeading>
               <Button
-                variant="soft"
+                variant="ghost"
                 color="gray"
+                className="rank-up-quest-capture-button"
                 onClick={capturePage}
-                disabled={running || capturing || server !== "CN"}
+                disabled={running || capturing || server == null}
               >
                 <ReloadIcon />
                 {capturing ? "正在截图…" : capture ? "重新截图" : "截取游戏画面"}
@@ -225,6 +224,7 @@ export function RankUpQuestPage({
                       className={`rank-up-quest-row${row.actionable ? " is-actionable" : " is-disabled"}${selected ? " is-selected" : ""}`}
                       disabled={!row.actionable || running}
                       aria-label={row.actionable ? "选择可强化任务" : "不可点击的强化任务"}
+                      aria-pressed={selected}
                       onClick={() => setSelectedCandidateId(row.candidateId)}
                     >
                       <span>{row.actionable ? (selected ? "已选择" : "可强化") : "不可点击"}</span>
@@ -233,24 +233,22 @@ export function RankUpQuestPage({
                 })}
               </Box>
             ) : (
-              <Text size="2" color="gray">请先在游戏中打开强化任务页面，再截取画面。</Text>
+              <div className="rank-up-quest-empty">
+                <ImageIcon width={28} height={28} aria-hidden="true" />
+                <Text size="2" color="gray">请先在游戏中打开强化任务页面，再截取画面。</Text>
+              </div>
             )}
           </Box>
         )}
-
-        {error && <Text size="2" color="red">{error}</Text>}
-        {running && (
-          <Text size="2" color="gray">当前页面：{currentScreen || "正在启动"}</Text>
-        )}
       </Flex>
 
-      <Flex justify="end" align="center" className="page-footer" gap="3">
-        {running ? (
-          <Button color="red" variant="soft" onClick={() => void invoke("stop_automation")}>停止</Button>
-        ) : (
-          <Button disabled={!canStart} onClick={handleStart}>开始强化任务</Button>
-        )}
+      <Flex justify="between" className="page-footer rank-up-quest-footer" gap="4">
+        <FooterNote className="task-status" role={statusError ? "alert" : "status"}>
+          {statusMessage}
+        </FooterNote>
+        <TaskActionButton label={running ? "停止" : "开始强化任务"} running={running} disabled={!running && !canStart}
+          onClick={running ? () => void invoke("stop_automation") : handleStart} />
       </Flex>
-    </Flex>
+    </main>
   );
 }

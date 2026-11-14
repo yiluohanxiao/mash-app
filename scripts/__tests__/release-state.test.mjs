@@ -10,8 +10,8 @@ import { pwshArgs, psLiteral as ps } from "./helpers/pwsh.mjs";
 const repo = fileURLToPath(new URL("../../", import.meta.url));
 const helper = path.join(repo, "scripts/shared/release-state.mjs");
 const windows = process.platform === "win32";
-const invoke = (command, args, cwd) => execFileSync(command, args, {
-  cwd, encoding: "utf8", windowsHide: true, stdio: "pipe",
+const invoke = (command, args, cwd, env = process.env) => execFileSync(command, args, {
+  cwd, env, encoding: "utf8", windowsHide: true, stdio: "pipe",
 });
 test("configured runtime versions match each platform in the bundled manifest", () => {
   const versions = JSON.parse(invoke(process.execPath, [helper, "versions"], repo));
@@ -87,7 +87,8 @@ test("shared release CLIs execute through a directory alias", t => {
   // Preserve the alias in import.meta.url to exercise differing entry/module paths
   // on every host, including the native path normalization needed on Windows.
   const runtime = (...refs) => invoke(process.execPath, ["--preserve-symlinks-main",
-    path.join(alias, "runtime-inputs.mjs"), ...refs, "windows-x86_64"], f.root).trim();
+    path.join(alias, "runtime-inputs.mjs"), ...refs, "windows-x86_64"], f.root,
+    { ...process.env, FORCE_COLOR: "1" }).trim();
   assert.equal(runtime("HEAD", "HEAD"), "false");
   f.write("sidecar/cv-runtime/build_runtime.py", "changed runtime builder");
   f.commit();
@@ -187,6 +188,19 @@ test("changelog finalization handles CRLF and preserves the release notes", t =>
   f.write("CHANGELOG.md", "# Notes\r\n## 未发布\r\n\r\n中文内容\r\n");
   f.run("changelog", "1.1.0", "2026-10-12");
   assert.match(f.read("CHANGELOG.md"), /## v1.1.0 - 2026-10-12\n\r\n中文内容/);
+});
+
+test("release planning matches an exact version heading with LF or CRLF", t => {
+  const f = fixture(t);
+  for (const newline of ["\n", "\r\n"]) {
+    f.write("CHANGELOG.md", `# Changes${newline}${newline}## v1.1.0 - 2026-11-06${newline}${newline}Notes${newline}`);
+    assert.equal(JSON.parse(f.run("plan", "1.1.0", "-", "windows-x86_64")).changelog, "ready");
+    for (const heading of ["## v1x1x0 - 2026-11-06", "## v1.1.01 - 2026-11-06", "### v1.1.0 - 2026-11-06"]) {
+      f.write("CHANGELOG.md", `${heading}${newline}`);
+      assert.throws(() => f.run("plan", "1.1.0", "-", "windows-x86_64"), /Missing target release/);
+    }
+  }
+  assert.throws(() => f.run("plan", "1.1.0.*", "-", "windows-x86_64"), /Version must/);
 });
 test("PowerShell entry point prints its plan without creating files or tags", { skip: !windows }, t => {
   const f = fixture(t);

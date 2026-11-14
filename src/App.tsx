@@ -25,6 +25,8 @@ import { EventFarmPage } from "./features/event-farm/EventFarmPage";
 import { HomePage } from "./features/home/HomePage";
 import { DebugPage } from "./features/debug/DebugPage";
 import { StatusBar } from "./features/status/StatusBar";
+import { projectThresholdScope, waitForThresholdWrites } from "./features/settings/recognitionThresholdQueue";
+import type { ThresholdKey } from "./features/settings/recognitionSettingsModel";
 import { PendingProjectWrites } from "./features/projects/pendingProjectWrites";
 import { ProjectBar } from "./features/projects/ProjectBar";
 import { ProjectSettingsDialog } from "./features/projects/ProjectSettingsDialog";
@@ -51,6 +53,7 @@ import type { AssetBundleStatus } from "./types/assets";
 import type { RuntimeStatus } from "./types/runtime";
 import type { SelfCheckStatus } from "./types/selfCheck";
 import type { AppColorTheme, AppTheme, AppThemePreference } from "./types/theme";
+import type { Server } from "./types/server";
 import {
   DEFAULT_BATTLE_START_PANEL,
   normalizeBattleStartPanel,
@@ -138,7 +141,10 @@ function App({
   startupReady = true,
 }: AppProps) {
   const projectWrites = useRef(new PendingProjectWrites());
-  const beforeFormationShare = useCallback((projectId: string) => projectWrites.current.wait(projectId), []);
+  const beforeFormationShare = useCallback(async (projectId: string) => {
+    await waitForThresholdWrites(projectThresholdScope(projectId));
+    await projectWrites.current.wait(projectId);
+  }, []);
   const [commandBusy, setCommandBusy] = useState(false);
   const [navigationLocked, setNavigationLocked] = useState(false);
   const navigationLocksRef = useRef({ packetCapture: false, resources: false });
@@ -154,6 +160,7 @@ function App({
     navigationLocksRef.current.packetCapture || navigationLocksRef.current.resources
   ), []);
   const [view, setView] = useState<View>("team");
+  const [server, setServer] = useState<Server | null>(null);
   const [homeMasterFigureId, setHomeMasterFigureId] = useState(470);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [projectSettingsOpen, setProjectSettingsOpen] = useState(false);
@@ -694,6 +701,12 @@ function App({
       setProjects((prev) => prev.map((p) => (p.id === saved.id ? saved : p)));
     }), []);
 
+  const handleSaveProjectThreshold = useCallback((projectId: string, key: ThresholdKey, value: number | null) =>
+    projectWrites.current.track(projectId, `threshold:${key}`, async () => {
+      const saved = await invoke<Project>("set_project_recognition_threshold", { projectId, key, value });
+      setProjects((prev) => prev.map((project) => project.id === saved.id ? saved : project));
+    }), []);
+
   // Derive the SlotItem array shown by ContentGrid from the active project.
   // The backend owns slot order + servant ids; here we just rehydrate the
   // referenced Servant objects so the UI can render names/classes/rarity.
@@ -1129,9 +1142,25 @@ function App({
             />
           ) : view === "rankUpQuest" && featureToggles.rankUpQuest ? (
             <RankUpQuestPage
+              server={server}
               projects={projects}
+              projectCatalog={projectCatalog}
+              grandClassDefinitions={grandClassDefinitions}
               activeProjectId={activeProjectId}
               onProjectSelect={handleProjectSelect}
+              onCreateProject={handleCreateProject}
+              onRenameProject={handleRenameProject}
+              onDuplicateProject={handleDuplicateProject}
+              onDeleteProject={handleDeleteProject}
+              onCreateProjectGroup={handleCreateProjectGroup}
+              onRenameProjectGroup={handleRenameProjectGroup}
+              onDeleteProjectGroup={handleDeleteProjectGroup}
+              onMoveProjectToGroup={handleMoveProjectToGroup}
+              onReorderProjectGroups={handleReorderProjectGroups}
+              onReorderProjectsInGroup={handleReorderProjectsInGroup}
+              onOpenProjectSettings={handleOpenProjectSettings}
+              beforeShare={beforeFormationShare}
+              onFormationImported={handleFormationImported}
               onBack={handleOpenHome}
               onAutomationStart={() => handleBattleAutomationStart(null)}
               onAutomationStartFailed={handleBattleAutomationStartFailed}
@@ -1313,6 +1342,7 @@ function App({
         </Box>
       </Flex>
       <StatusBar
+        onServerChange={setServer}
         navigationDisabled={navigationLocked}
         onOpenSettings={handleOpenSettings}
         onOpenDebug={featureToggles.cvDebug ? handleOpenDebug : undefined}
@@ -1336,6 +1366,7 @@ function App({
       />
       <TeamVerificationDialog />
       <ProjectSettingsDialog
+        onSaveThreshold={handleSaveProjectThreshold}
         open={projectSettingsOpen}
         project={activeProject}
         onOpenChange={setProjectSettingsOpen}

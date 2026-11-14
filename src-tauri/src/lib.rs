@@ -99,6 +99,10 @@ pub fn run() {
             app.manage(Mutex::new(FriendPointSummonRunnerHandle::new_idle()));
             app.manage(DeviceOperationCoordinator::default());
             app.manage(packet_capture::ResponseStore::default());
+            app.manage(packet_capture::AuthorizationStore::default());
+            app.manage(packet_capture::CaptureTargetStore::new(
+                paths::app_data_dir(app.handle()).join("packet-capture/clients.json"),
+            ));
             app.manage(Arc::new(packet_capture::HistoryStore::new(
                 paths::app_data_dir(app.handle()).join("packet-capture"),
             )));
@@ -115,8 +119,12 @@ pub fn run() {
             commands::packet_capture::install_capture_certificate,
             commands::packet_capture::configure_packet_capture,
             commands::packet_capture::start_packet_capture,
+            commands::packet_capture::get_packet_capture_authorization,
+            commands::packet_capture::submit_packet_capture_api_key,
             commands::packet_capture::get_packet_capture_response,
             commands::packet_capture::setup_packet_capture,
+            commands::packet_capture::get_packet_capture_apps,
+            commands::packet_capture::select_packet_capture_app,
             commands::packet_capture::get_packet_capture_workspace,
             commands::packet_capture::select_packet_capture_record,
             commands::packet_capture::delete_packet_capture_record,
@@ -196,6 +204,8 @@ pub fn run() {
             commands::projects::create_project,
             commands::projects::duplicate_project,
             commands::projects::update_project,
+            commands::projects::get_project_recognition_settings,
+            commands::projects::set_project_recognition_threshold,
             commands::projects::delete_project,
             commands::projects::delete_slot_servant,
             commands::adb::check_adb,
@@ -237,6 +247,7 @@ pub fn run() {
             commands::settings::set_support_full_list_ocr_fallback,
             commands::settings::set_auto_friend_request,
             commands::settings::set_unknown_screen_timeout_count,
+            commands::settings::set_ap_recovery_confirm_wait_ms,
             commands::settings::set_auto_capture_battle_before_attack,
             commands::settings::set_auto_capture_battle_result_loot,
             commands::settings::set_auto_capture_skill_use_probe,

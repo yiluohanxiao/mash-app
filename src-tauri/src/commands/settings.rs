@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 
 pub(crate) const SUPPORT_CE_THRESHOLD_DEFAULT: f64 = 0.70;
@@ -28,6 +28,9 @@ pub(crate) const SUPPORT_ICON_THRESHOLD_MAX: f64 = 0.85;
 pub(crate) const SUPPORT_CE_FULL_GATE_THRESHOLD_DEFAULT: f64 = 0.60;
 pub(crate) const SUPPORT_CE_FULL_GATE_THRESHOLD_MIN: f64 = 0.40;
 pub(crate) const SUPPORT_CE_FULL_GATE_THRESHOLD_MAX: f64 = 0.70;
+pub(crate) const AP_RECOVERY_CONFIRM_WAIT_MS_DEFAULT: u32 = 1_000;
+pub(crate) const AP_RECOVERY_CONFIRM_WAIT_MS_MIN: u32 = 500;
+pub(crate) const AP_RECOVERY_CONFIRM_WAIT_MS_MAX: u32 = 60_000;
 pub(crate) const UNKNOWN_SCREEN_TIMEOUT_COUNT_DEFAULT: u32 = 100;
 pub(crate) const UNKNOWN_SCREEN_TIMEOUT_COUNT_MIN: u32 = 50;
 pub(crate) const UNKNOWN_SCREEN_TIMEOUT_COUNT_MAX: u32 = 1_000;
@@ -80,6 +83,8 @@ pub struct RecognitionSettings {
     pub support_full_list_ocr_fallback: bool,
     #[serde(default = "default_unknown_screen_timeout_count")]
     pub unknown_screen_timeout_count: u32,
+    #[serde(default = "default_ap_recovery_confirm_wait_ms")]
+    pub ap_recovery_confirm_wait_ms: u32,
     #[serde(default)]
     pub auto_friend_request: bool,
 }
@@ -99,6 +104,7 @@ impl Default for RecognitionSettings {
             enable_extra_class_filter: true,
             support_full_list_ocr_fallback: false,
             unknown_screen_timeout_count: UNKNOWN_SCREEN_TIMEOUT_COUNT_DEFAULT,
+            ap_recovery_confirm_wait_ms: AP_RECOVERY_CONFIRM_WAIT_MS_DEFAULT,
             auto_friend_request: false,
         }
     }
@@ -114,6 +120,19 @@ fn default_support_icon_threshold() -> f64 {
 
 fn default_support_ce_full_gate_threshold() -> f64 {
     SUPPORT_CE_FULL_GATE_THRESHOLD_DEFAULT
+}
+
+fn default_ap_recovery_confirm_wait_ms() -> u32 {
+    AP_RECOVERY_CONFIRM_WAIT_MS_DEFAULT
+}
+
+fn normalize_ap_recovery_confirm_wait_ms(value: u32) -> Result<u32, String> {
+    if !(AP_RECOVERY_CONFIRM_WAIT_MS_MIN..=AP_RECOVERY_CONFIRM_WAIT_MS_MAX).contains(&value) {
+        return Err(format!(
+            "回复道具确认等待时长必须在 {AP_RECOVERY_CONFIRM_WAIT_MS_MIN} 到 {AP_RECOVERY_CONFIRM_WAIT_MS_MAX} 毫秒之间"
+        ));
+    }
+    Ok(value)
 }
 
 fn default_unknown_screen_timeout_count() -> u32 {
@@ -196,6 +215,31 @@ fn normalize_support_ce_full_gate_threshold(value: f64) -> Result<f64, String> {
         SUPPORT_CE_FULL_GATE_THRESHOLD_MIN,
         SUPPORT_CE_FULL_GATE_THRESHOLD_MAX,
     )
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum ThresholdKey {
+    SupportCeThreshold,
+    SupportCeFullGateThreshold,
+    SupportMlbIconThreshold,
+    SupportBondIconThreshold,
+}
+
+pub(crate) fn normalize_recognition_threshold(
+    key: ThresholdKey,
+    value: f64,
+) -> Result<f64, String> {
+    match key {
+        ThresholdKey::SupportCeThreshold => normalize_support_ce_threshold(value),
+        ThresholdKey::SupportCeFullGateThreshold => normalize_support_ce_full_gate_threshold(value),
+        ThresholdKey::SupportMlbIconThreshold => {
+            normalize_support_icon_threshold(value, "满破图标阈值")
+        }
+        ThresholdKey::SupportBondIconThreshold => {
+            normalize_support_icon_threshold(value, "牵绊图标阈值")
+        }
+    }
 }
 
 fn apply_stop_on_bond_level_up(settings: &mut RecognitionSettings, value: bool) {
@@ -321,6 +365,9 @@ pub(crate) fn load_recognition_settings(
         unknown_screen_timeout_count: normalize_unknown_screen_timeout_count(
             settings.unknown_screen_timeout_count,
             "识别超时次数",
+        )?,
+        ap_recovery_confirm_wait_ms: normalize_ap_recovery_confirm_wait_ms(
+            settings.ap_recovery_confirm_wait_ms,
         )?,
         auto_friend_request: settings.auto_friend_request,
     })
@@ -514,6 +561,18 @@ pub(crate) fn set_auto_friend_request(
 }
 
 #[tauri::command]
+pub(crate) fn set_ap_recovery_confirm_wait_ms(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<RecognitionSettings>>,
+    value: u32,
+) -> Result<RecognitionSettings, String> {
+    let value = normalize_ap_recovery_confirm_wait_ms(value)?;
+    update_recognition_settings(&app, state.inner(), |settings| {
+        settings.ap_recovery_confirm_wait_ms = value;
+    })
+}
+
+#[tauri::command]
 pub(crate) fn set_unknown_screen_timeout_count(
     app: tauri::AppHandle,
     state: tauri::State<'_, Mutex<RecognitionSettings>>,
@@ -575,6 +634,7 @@ pub(crate) fn set_server(
     let json = serde_json::json!({ "server": value.to_string() });
     write_json_atomic(&path, &json, "服务器设置")?;
     *state.lock().unwrap() = value;
+    let _ = app.emit("packet-capture-context-changed", ());
 
     // Tear down any idle sidecar so the next debug or automation call
     // respawns it with the new server's templates / OCR model.

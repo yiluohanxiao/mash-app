@@ -900,6 +900,30 @@ fn support_search_worker_releases_only_after_a_confirmed_screen_exit() {
 }
 
 #[test]
+fn support_selection_waits_two_seconds_on_entry_and_each_reentry() {
+    use super::engine::support_select_entry_wait;
+
+    for previous in [Screen::Unknown, Screen::RankUpQuest, Screen::TeamConfirm] {
+        assert_eq!(
+            support_select_entry_wait(previous, Screen::SupportSelect),
+            Some(Duration::from_secs(2))
+        );
+    }
+    assert_eq!(
+        support_select_entry_wait(Screen::SupportSelect, Screen::SupportSelect),
+        None
+    );
+    assert_eq!(
+        support_select_entry_wait(Screen::SupportSelect, Screen::Unknown),
+        None
+    );
+    assert_eq!(
+        support_select_entry_wait(Screen::RankUpQuest, Screen::TeamConfirm),
+        None
+    );
+}
+
+#[test]
 fn bond_level_up_screenshot_path_uses_dedicated_directory_and_sortable_name() {
     let root = PathBuf::from("/tmp/mash-app-test");
     let timestamp = std::time::UNIX_EPOCH + Duration::from_millis(12_345);
@@ -4375,8 +4399,72 @@ fn party_lineup_change_applies_end_of_turn_servant_skill_withdraw_rule() {
 
     assert_eq!(
         ids,
-        [Some(11), Some(434), Some(384), Some(388), Some(22), None]
+        [Some(11), Some(434), Some(384), Some(22), Some(388), None]
     );
+}
+
+#[test]
+fn miss_crane_np_moves_to_reserve_tail_and_preserves_member_identity() {
+    let original = [
+        frontline_member("merlin", 0, 150, false),
+        frontline_member("crane-support", 1, 307, true),
+        frontline_member("waver", 2, 37, false),
+        frontline_member("crane-owned", 3, 307, false),
+        frontline_member("mash", 4, 1, false),
+        frontline_member("altria", 5, 2, false),
+    ];
+    let mut members = original.clone();
+    let mut counts = HashMap::new();
+    let card: AttackCard = serde_json::from_value(serde_json::json!({
+        "id": "crane-np", "card": "servant_2_np"
+    }))
+    .unwrap();
+    apply_attack_card_member_lineup_change(&mut members, &card, &mut counts);
+    assert_eq!(
+        members,
+        [
+            original[0].clone(),
+            original[3].clone(),
+            original[2].clone(),
+            original[4].clone(),
+            original[5].clone(),
+            original[1].clone(),
+        ]
+    );
+    assert_eq!(counts.get(original[1].as_ref().unwrap()), Some(&1));
+    assert!(!counts.contains_key(original[3].as_ref().unwrap()));
+}
+
+#[test]
+fn miss_crane_np_retreat_handles_partial_reserves_and_frontline_restrictions() {
+    for (initial, expected) in [
+        (
+            [Some(307), Some(150), Some(37), None, Some(1), Some(2)],
+            [Some(1), Some(150), Some(37), Some(2), Some(307), None],
+        ),
+        (
+            [Some(307), Some(150), Some(37), None, None, Some(1)],
+            [Some(1), Some(150), Some(37), Some(307), None, None],
+        ),
+        (
+            [Some(307), Some(150), Some(37), None, None, None],
+            [Some(307), Some(150), Some(37), None, None, None],
+        ),
+        (
+            [Some(307), None, None, Some(1), Some(2), None],
+            [Some(307), None, None, Some(1), Some(2), None],
+        ),
+    ] {
+        let mut members = std::array::from_fn(|i| {
+            initial[i].map(|id| runtime_member(&format!("slot-{i}"), i, id, false))
+        });
+        let card: AttackCard = serde_json::from_value(serde_json::json!({
+            "id": "crane-np", "card": "servant_1_np"
+        }))
+        .unwrap();
+        apply_attack_card_member_lineup_change(&mut members, &card, &mut HashMap::new());
+        assert_eq!(party_member_ids(&members), expected);
+    }
 }
 
 #[test]
@@ -6448,31 +6536,51 @@ fn event_mode_stops_once_every_allowed_apple_is_exhausted() {
 }
 
 #[test]
+fn ap_recovery_defaults_to_one_second_before_confirmation() {
+    let cfg: RunConfig = serde_json::from_value(minimal_run_config_json()).unwrap();
+    assert_eq!(cfg.ap_recovery_confirm_wait_ms, 1_000);
+    let mut json = minimal_run_config_json();
+    json["apRecoveryConfirmWaitMs"] = serde_json::json!(2_500);
+    let cfg: RunConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(cfg.ap_recovery_confirm_wait_ms, 2_500);
+    assert_eq!(AP_RECOVERY_TAP_SETTLE, Duration::from_millis(500));
+}
+
+#[test]
 fn ap_recovery_waits_half_a_second_between_item_and_confirmation_steps() {
     assert_eq!(AP_RECOVERY_TAP_SETTLE, Duration::from_millis(500));
 }
 
 #[test]
-fn ap_recovery_confirm_region_uses_dialog_layout_for_each_item_group() {
+fn ap_recovery_confirmation_always_waits_at_least_500_ms() {
+    for wait_ms in [0, 1, 499, 500] {
+        assert_eq!(
+            ap_recovery_confirm_wait_duration(wait_ms),
+            Duration::from_millis(500)
+        );
+    }
+    assert_eq!(
+        ap_recovery_confirm_wait_duration(1_750),
+        Duration::from_millis(1_750)
+    );
+}
+
+#[test]
+fn ap_recovery_confirm_point_uses_dialog_layout_for_each_item_group() {
     for item in [ApRecoveryItem::Rainbow, ApRecoveryItem::Gold] {
-        let region = ap_recovery_confirm_region(item);
-        approx(region.x, AP_RECOVERY_CONFIRM_UPPER_REGION.x);
-        approx(region.y, AP_RECOVERY_CONFIRM_UPPER_REGION.y);
-        approx(region.w, AP_RECOVERY_CONFIRM_UPPER_REGION.w);
-        approx(region.h, AP_RECOVERY_CONFIRM_UPPER_REGION.h);
+        let point = ap_recovery_confirm_point(item);
+        approx(point.x, 0.66);
+        approx(point.y, 0.78);
     }
     for item in [
         ApRecoveryItem::Silver,
         ApRecoveryItem::Bronze,
         ApRecoveryItem::Copper,
     ] {
-        let region = ap_recovery_confirm_region(item);
-        approx(region.x, AP_RECOVERY_CONFIRM_LOWER_REGION.x);
-        approx(region.y, AP_RECOVERY_CONFIRM_LOWER_REGION.y);
-        approx(region.w, AP_RECOVERY_CONFIRM_LOWER_REGION.w);
-        approx(region.h, AP_RECOVERY_CONFIRM_LOWER_REGION.h);
+        let point = ap_recovery_confirm_point(item);
+        approx(point.x, 0.66);
+        approx(point.y, 0.81);
     }
-    assert_eq!(AP_RECOVERY_CONFIRM_TEMPLATE, "shared/button_dialog");
 }
 
 #[test]
