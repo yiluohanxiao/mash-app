@@ -289,6 +289,18 @@ impl SidecarClient {
         );
     }
 
+    /// Scope detection to the event-farm loop: battle screens plus the
+    /// event map / terminal / quest-card screens.
+    pub fn use_event_detection(&mut self) {
+        self.detection_screens = Some(
+            super::types::BATTLE_DETECTION_SCREENS
+                .iter()
+                .chain(super::types::EVENT_ONLY_DETECTION_SCREENS.iter())
+                .map(|name| name.to_string())
+                .collect(),
+        );
+    }
+
     fn check_response(&mut self, response: &serde_json::Value) -> CvResult<()> {
         if let Some(error) = template_response_error(response) {
             self.healthy = false;
@@ -302,7 +314,11 @@ impl SidecarClient {
         &mut self,
         request: &serde_json::Value,
     ) -> Result<serde_json::Value, CvError> {
-        self.send_recv_with_timeout(request, Duration::from_secs(10))
+        // The sidecar recycles its OCR subprocess every N detects
+        // (reason=detect-limit) and the request that triggers a recycle also
+        // waits for the new process's model load, which can exceed 10s on a
+        // cold cache. Give every command that allowance.
+        self.send_recv_with_timeout(request, Duration::from_secs(60))
     }
 
     /// Like `send_recv` but with a caller-specified timeout. Used by commands

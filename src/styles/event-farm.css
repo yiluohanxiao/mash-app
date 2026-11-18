@@ -1,0 +1,21 @@
+.event-farm-team-select {
+  min-width: min(420px, 100%);
+}
+
+.event-farm-help {
+  display: block;
+  margin-top: 8px;
+}
+
+.event-farm-notice {
+  padding: 12px 14px;
+  border: 1px solid var(--red-6);
+  border-radius: var(--radius-3);
+  background: var(--red-2);
+}
+
+.event-farm-page label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}

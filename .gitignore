@@ -52,5 +52,8 @@ sidecar/cv-code/training/digit_classifier/runs/
 # Screenshot examples
 .screenshots/
 
+# Read-only reference export (fgo-auto), see REFACTOR-TO-MASH.md
+reference/fgo-auto/
+
 # Mise
 .mise.toml

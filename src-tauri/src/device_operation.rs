@@ -9,6 +9,7 @@ pub(crate) use cancellation::OperationCancellation;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AutomationKind {
     Battle,
+    EventFarm,
     ServantEnhancement,
     CraftEssenceEnhancement,
     FriendPointSummon,
@@ -18,6 +19,7 @@ impl AutomationKind {
     fn label(self) -> &'static str {
         match self {
             Self::Battle => "战斗自动化",
+            Self::EventFarm => "活动自动刷本",
             Self::ServantEnhancement => "从者强化自动化",
             Self::CraftEssenceEnhancement => "概念礼装强化自动化",
             Self::FriendPointSummon => "友情点抽取自动化",
@@ -299,6 +301,7 @@ mod tests {
         );
         for kind in [
             AutomationKind::Battle,
+            AutomationKind::EventFarm,
             AutomationKind::ServantEnhancement,
             AutomationKind::CraftEssenceEnhancement,
             AutomationKind::FriendPointSummon,

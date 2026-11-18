@@ -25,8 +25,10 @@ use crate::{
 };
 
 mod capture;
+mod event_scan;
 mod session;
 pub use capture::*;
+pub use event_scan::*;
 
 use session::{
     current_server, debug_image_path, debug_stream_status, ensure_debug_stream,

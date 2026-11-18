@@ -9,6 +9,10 @@ use std::time::Duration;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ScrcpyTouchEvent {
     pub action: u8,
+    /// Finger slot. A second DOWN with a fresh id becomes
+    /// ACTION_POINTER_DOWN on the scrcpy server, which is what makes
+    /// two-finger gestures (pinch) possible.
+    pub pointer_id: u64,
     pub x: u32,
     pub y: u32,
     pub at_ms: u32,
@@ -99,6 +103,7 @@ mod tests {
     fn touch_event_fields_match_python_protocol() {
         let event = serde_json::to_value(ScrcpyTouchEvent {
             action: 2,
+            pointer_id: 1,
             x: 40,
             y: 80,
             at_ms: 20,
@@ -106,7 +111,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             event,
-            serde_json::json!({"action":2,"x":40,"y":80,"atMs":20})
+            serde_json::json!({"action":2,"pointerId":1,"x":40,"y":80,"atMs":20})
         );
     }
 }

@@ -44,6 +44,7 @@ import type {
   BondLevelUpReadResultDto,
   CommandCardMatchDto,
   DebugCaptureResult,
+  DebugEventScanResultDto,
   DebugStreamFrameResultDto,
   DebugStreamStatusDto,
   ElementMatchDto,
@@ -144,6 +145,7 @@ export function DebugPage({
 
   const [probes, setProbes] = useState<ProbeResult[]>([]);
   const [capturing, setCapturing] = useState(false);
+  const [scanningEventMap, setScanningEventMap] = useState(false);
   const [dynamicCapture, setDynamicCapture] = useState(false);
   const [dynamicCapturePaused, setDynamicCapturePaused] = useState(false);
   const [probing, setProbing] = useState(false);
@@ -506,6 +508,42 @@ export function DebugPage({
       setCapturing(false);
     }
   }, [captureFrame, log]);
+
+  const handleScanEventMap = useCallback(async () => {
+    setScanningEventMap(true);
+    log("扫描活动地图…（约 1–3 分钟，请勿操作设备；需先手动进入活动地图）");
+    try {
+      const result = await invoke<DebugEventScanResultDto>(
+        "debug_scan_event_map"
+      );
+      log(
+        `活动地图：${result.labels.length} 个区域标签 [${result.labels.join("、")}]`
+      );
+      if (result.points != null) log(`活动点数：${result.points}`);
+      for (const card of result.cards) {
+        log(
+          `${card.name} | 等级${card.level}${"+".repeat(card.plus)} | AP${card.ap} | ${
+            card.locked ? "锁定" : "可打"
+          }`
+        );
+      }
+      if (result.best) {
+        log(
+          `最优刷点本：${result.best.name} (等级${result.best.level}${"+".repeat(
+            result.best.plus
+          )} AP${result.best.ap})`
+        );
+      }
+      log(
+        result.cached ? "扫描结果已写入 3 小时缓存" : "扫描结果未能写入缓存",
+        result.cached ? "info" : "warn"
+      );
+    } catch (err) {
+      log(`扫描活动地图失败: ${err}`, "error");
+    } finally {
+      setScanningEventMap(false);
+    }
+  }, [log]);
 
   const handleConnectStream = useCallback(async () => {
     setConnectingStream(true);
@@ -1391,6 +1429,18 @@ export function DebugPage({
               onClick={handleCapture}
             >
               {capturing ? "截取中…" : "截取画面"}
+            </Button>
+
+            <Button
+              type="button"
+              size="1"
+              variant="soft"
+              color="violet"
+              disabled={scanningEventMap}
+              onClick={handleScanEventMap}
+              title="缩到最小并归位后，逐个打开区域标签读取任务卡；需先手动进入活动地图"
+            >
+              {scanningEventMap ? "扫描中…" : "扫描活动地图"}
             </Button>
 
             <Button

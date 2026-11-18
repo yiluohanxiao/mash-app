@@ -13,6 +13,7 @@
 | `Attack` | 确认速度、读取卡片与宝具、提交三次攻击 |
 | `BattleResultBond` / `BattleResultExp` / `BattleResultLoot` | 依次关闭结算及升级提示 |
 | `BattleResultFriendRequest` | 跳过好友申请 |
+| `CommandCodeDetail` | 掉落新指令码时客户端自动弹出的详情页；点左上「关闭」（60,63）后结算链继续 |
 | `BattleResultContinue` | 重复关卡时返回助战选择，并重置战斗上下文 |
 | `APRecovery` | 按配置恢复 AP，再交回页面路由 |
 

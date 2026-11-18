@@ -43,7 +43,11 @@ impl Runner {
     }
 
     fn run_loop(&mut self) -> AutomationResult<()> {
-        self.sidecar().use_battle_detection();
+        if self.event_farm_active() {
+            self.sidecar().use_event_detection();
+        } else {
+            self.sidecar().use_battle_detection();
+        }
         let timeout = self.config.unknown_screen_timeout_count;
         if let Err(error) = self.sidecar().configure_recognition_diagnostics(timeout) {
             self.emit_debug("CV", &error);
@@ -207,7 +211,47 @@ impl Runner {
                     last_detected_screen = screen;
                     self.handle_ap_recovery()?;
                 }
-                Screen::Unknown => {
+                // A new command-code drop pushes its detail page over the
+                // settlement chain in any mode; closing it resumes the
+                // normal flow underneath.
+                Screen::CommandCodeDetail => {
+                    unknown_count = 0;
+                    last_detected_screen = screen;
+                    self.handle_command_code_detail()?;
+                }
+                // Event-farm mode routes the map/entry screens and the
+                // event-only dialogs through the event runtime; ordinary
+                // runs never see them (battle detection scope excludes
+                // them all).
+                Screen::EventMap
+                | Screen::NodeDetail
+                | Screen::QuestConfirm
+                | Screen::Gate
+                | Screen::Story
+                | Screen::SkipConfirm
+                | Screen::TapContinue
+                | Screen::Tip
+                | Screen::ListUpdate
+                | Screen::NpCeNotice
+                | Screen::GameNotice
+                | Screen::RepeatConfirm
+                | Screen::ServantFull
+                | Screen::Defeat
+                | Screen::PartyConfirm => {
+                    unknown_count = 0;
+                    last_detected_screen = screen;
+                    self.handle_event_screen(screen)?;
+                }
+                // Wait-only screens: keep animation skips running, count
+                // toward the recognition timeout, never tap.
+                Screen::Unknown
+                | Screen::Terminal
+                | Screen::Loading
+                | Screen::Title
+                | Screen::Busy
+                | Screen::Cg
+                | Screen::RewardSelect
+                | Screen::RewardPage => {
                     unknown_count += 1;
                     let timeout = self.config.unknown_screen_timeout_count;
                     if unknown_count >= timeout {
@@ -251,7 +295,12 @@ impl Runner {
                         "Unknown",
                         &unknown_screen_wait_message(self.server, unknown_count, timeout),
                     );
-                    if is_battle_result_screen(last_detected_screen) {
+                    // The fixed skip point is only safe on the ordinary
+                    // settlement pages. In the event loop every known
+                    // overlay has its own handler, and a blind tap here
+                    // landed on map/home chrome (soak 8b): just wait.
+                    if is_battle_result_screen(last_detected_screen) && !self.event_farm_active()
+                    {
                         self.emit_debug("Unknown", "结算页可能被弹窗遮挡，尝试点击跳过区域");
                         if self.tap_at("Unknown", BATTLE_RESULT_POPUP_SKIP) {
                             thread::sleep(ACTION_DELAY);
@@ -274,6 +323,16 @@ impl Runner {
     }
 
     // -- battle screen handlers ----------------------------------------------
+
+    /// Command-code detail page: only 关闭 dismisses it; the settlement
+    /// chain continues on the screen underneath.
+    fn handle_command_code_detail(&mut self) -> AutomationResult<()> {
+        self.emit("CommandCodeDetail", "掉落指令码详情页，点击左上「关闭」");
+        if self.tap_at("CommandCodeDetail", COMMAND_CODE_DETAIL_CLOSE) {
+            thread::sleep(ACTION_DELAY);
+        }
+        Ok(())
+    }
 
     fn skip_attack_animation_if_due(&mut self, screen: Screen, actionable: bool) -> bool {
         if self

@@ -59,6 +59,22 @@ pub trait TouchBackend: Send {
         settle_ms: u32,
     ) -> Result<(), String>;
 
+    /// Two-finger horizontal pinch centered on `center` (device
+    /// pixels). Both contacts start `from_gap` px apart and end
+    /// `to_gap` px apart; `to_gap < from_gap` zooms out.
+    ///
+    /// A single-finger swipe is *not* an acceptable substitute: the
+    /// event map reads it as a pan and the map keeps its zoom level.
+    /// Backends that cannot emit multi-pointer gestures must return
+    /// an error.
+    fn pinch(
+        &mut self,
+        center: (u32, u32),
+        from_gap: u32,
+        to_gap: u32,
+        duration_ms: u32,
+    ) -> Result<(), String>;
+
     /// Stable human-readable identifier for logging. Surfaces in the
     /// status-bar debug log alongside scroll diagnostics so an operator
     /// can tell which backend produced which gesture.
@@ -87,12 +103,24 @@ pub fn build(
 ) -> Box<dyn TouchBackend> {
     let inner: Box<dyn TouchBackend> = match sidecar.scrcpy_control(adb) {
         Some(control) => Box::new(scrcpy::ScrcpyTouchBackend::new(control, screen_size)),
-        None => Box::new(adb_input::AdbInputBackend::new(adb.clone())),
+        None => Box::new(adb_input::AdbInputBackend::new(adb.clone(), screen_size)),
     };
     let backend: Box<dyn TouchBackend> = Box::new(HumanizedTouch::new(inner, screen_size));
     let message = format!("[touch] backend selected: {}", backend.name());
     eprintln!("{message}");
     crate::operation_log::emit_debug(app, crate::operation_log::DebugSource::App, message);
+    backend
+}
+
+/// Humanized ADB-only input for processes that run without the GUI app
+/// (the headless event harness): no scrcpy control socket exists, so taps
+/// go through the ADB backend, with the same product-wide jitter policy.
+pub(crate) fn build_adb_humanized(adb: &Adb, screen_size: (u32, u32)) -> Box<dyn TouchBackend> {
+    let backend: Box<dyn TouchBackend> = Box::new(HumanizedTouch::new(
+        Box::new(adb_input::AdbInputBackend::new(adb.clone(), screen_size)),
+        screen_size,
+    ));
+    eprintln!("[touch] backend selected: {}", backend.name());
     backend
 }
 
@@ -147,6 +175,20 @@ impl TouchBackend for HumanizedTouch {
             swipe_ms,
             settle_ms,
         )
+    }
+
+    fn pinch(
+        &mut self,
+        center: (u32, u32),
+        from_gap: u32,
+        to_gap: u32,
+        duration_ms: u32,
+    ) -> Result<(), String> {
+        // Shift both contacts by the same offset so the pinch axis and
+        // gap stay intact; jittering each finger separately would change
+        // the zoom distance.
+        let center = self.jittered(center, jitter_offset());
+        self.inner.pinch(center, from_gap, to_gap, duration_ms)
     }
 
     fn name(&self) -> &'static str {
@@ -211,6 +253,15 @@ mod tests {
                 &mut self,
                 _: (u32, u32),
                 _: (u32, u32),
+                _: u32,
+                _: u32,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            fn pinch(
+                &mut self,
+                _: (u32, u32),
+                _: u32,
                 _: u32,
                 _: u32,
             ) -> Result<(), String> {

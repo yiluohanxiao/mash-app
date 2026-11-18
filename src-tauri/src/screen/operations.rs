@@ -443,6 +443,71 @@ impl SidecarClient {
             .map_err(|e| format!("invalid ocr_region response: {e}"))?)
     }
 
+    /// Read the complete region labels in the current event-map viewport.
+    pub fn read_map_labels(
+        &mut self,
+        image_path: Option<&Path>,
+    ) -> Result<MapLabelsResult, CvError> {
+        let mut req = request(SidecarCommand::ReadMapLabels, serde_json::json!({}))?;
+        Self::add_image_path(&mut req, image_path);
+        let resp = self.send_recv_with_timeout(&req, RECOVERABLE_OCR_COMMAND_TIMEOUT)?;
+        if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
+            return Err(CvError::Other(err.to_string()));
+        }
+        Ok(serde_json::from_value::<MapLabelsResult>(resp)
+            .map_err(|e| format!("invalid read_map_labels response: {e}"))?)
+    }
+
+    /// Read the quest card currently open on the event map.
+    pub fn read_quest_card(
+        &mut self,
+        image_path: Option<&Path>,
+    ) -> Result<QuestCardResult, CvError> {
+        let mut req = request(SidecarCommand::ReadQuestCard, serde_json::json!({}))?;
+        Self::add_image_path(&mut req, image_path);
+        let resp = self.send_recv_with_timeout(&req, RECOVERABLE_OCR_COMMAND_TIMEOUT)?;
+        if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
+            return Err(CvError::Other(err.to_string()));
+        }
+        Ok(serde_json::from_value::<QuestCardResult>(resp)
+            .map_err(|e| format!("invalid read_quest_card response: {e}"))?)
+    }
+
+    /// Read the event-point counter shown on the left of the event map.
+    pub fn read_event_points(
+        &mut self,
+        image_path: Option<&Path>,
+    ) -> Result<EventPointsResult, CvError> {
+        let mut req = request(SidecarCommand::ReadEventPoints, serde_json::json!({}))?;
+        Self::add_image_path(&mut req, image_path);
+        let resp = self.send_recv_with_timeout(&req, RECOVERABLE_OCR_COMMAND_TIMEOUT)?;
+        if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
+            return Err(CvError::Other(err.to_string()));
+        }
+        Ok(serde_json::from_value::<EventPointsResult>(resp)
+            .map_err(|e| format!("invalid read_event_points response: {e}"))?)
+    }
+
+    /// Downscaled grayscale frame for before/after map-pan comparison.
+    pub fn frame_thumbnail(
+        &mut self,
+        image_path: Option<&Path>,
+        width: u32,
+        height: u32,
+    ) -> Result<FrameThumbnail, CvError> {
+        let mut req = request(
+            SidecarCommand::FrameThumbnail,
+            serde_json::json!({ "width": width, "height": height }),
+        )?;
+        Self::add_image_path(&mut req, image_path);
+        let resp = self.send_recv(&req)?;
+        if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
+            return Err(CvError::Other(err.to_string()));
+        }
+        Ok(serde_json::from_value::<FrameThumbnail>(resp)
+            .map_err(|e| format!("invalid frame_thumbnail response: {e}"))?)
+    }
+
     /// Read the servant-enhancement level pair (``current/max``) using the
     /// sidecar's digit-template mapper.
     pub fn read_level_digits(

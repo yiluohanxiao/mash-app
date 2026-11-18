@@ -148,6 +148,19 @@ impl Runner {
         }
     }
 
+    /// Tap at device pixels. Event-map navigation works in device pixels
+    /// (label centers come from the sidecar); jitter is still applied by
+    /// the humanized wrapper, same as `tap_at`.
+    pub(crate) fn tap_screen_point(&mut self, screen: &str, point: (u32, u32)) -> bool {
+        match self.touch.tap(point.0, point.1) {
+            Ok(()) => true,
+            Err(err) => {
+                self.fail_action(screen, "点击", err);
+                false
+            }
+        }
+    }
+
     /// Hold a stationary touch at `point` for a controlled duration. The
     /// settle-style backend emits a real DOWN/MOVE/UP stream, which supports
     /// both long presses and short human-like presses that must not use

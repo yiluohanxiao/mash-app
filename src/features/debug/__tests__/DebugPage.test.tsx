@@ -98,6 +98,59 @@ describe("DebugPage", () => {
     expect(screen.getByRole("button", { name: "识别" })).toBeDisabled();
   });
 
+  it("scans the event map and logs the parsed cards", async () => {
+    const user = userEvent.setup();
+    const card = {
+      name: "90++ 刷点本",
+      level: 90,
+      plus: 2,
+      ap: 40,
+      locked: false,
+      cond: "",
+      label: "仙女座",
+    };
+    mockDebugPageBootstrap((cmd) => {
+      if (cmd === "debug_scan_event_map") {
+        return {
+          labels: ["仙女座", "废弃教堂"],
+          cards: [
+            card,
+            {
+              name: "主线关卡第五节",
+              level: 0,
+              plus: 0,
+              ap: 0,
+              locked: true,
+              cond: "点数达 12,000 以上",
+              label: "废弃教堂",
+            },
+          ],
+          points: 44400,
+          best: card,
+          cached: true,
+          screenSize: { w: 1920, h: 1080 },
+        };
+      }
+      return null;
+    });
+    renderDebugPage();
+
+    await user.click(screen.getByRole("button", { name: "扫描活动地图" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/活动地图：2 个区域标签/)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/活动点数：44400/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/90\+\+ 刷点本 \| 等级90\+\+ \| AP40 \| 可打/)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/主线关卡第五节 \| 等级0 \| AP0 \| 锁定/)
+    ).toBeInTheDocument();
+    expect(screen.getByText(/最优刷点本：90\+\+ 刷点本/)).toBeInTheDocument();
+    expect(screen.getByText(/已写入 3 小时缓存/)).toBeInTheDocument();
+  });
+
   it("recognizes configured digit regions only after the manual button is clicked", async () => {
     const user = userEvent.setup();
     mockDebugPageBootstrap((cmd) => {

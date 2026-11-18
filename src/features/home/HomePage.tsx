@@ -13,11 +13,13 @@ interface HomePageProps {
   showSummon: boolean;
   showEnhancement: boolean;
   showRankUpQuest: boolean;
+  showEventFarm: boolean;
   onSelectFigure: (id: number) => Promise<void>;
   onOpenTeam: () => void;
   onOpenSummon: () => void;
   onOpenCraftEssenceEnhancement: () => void;
   onOpenRankUpQuest: () => void;
+  onOpenEventFarm: () => void;
 }
 
 export function HomePage({
@@ -27,11 +29,13 @@ export function HomePage({
   showSummon,
   showEnhancement,
   showRankUpQuest,
+  showEventFarm,
   onSelectFigure,
   onOpenTeam,
   onOpenSummon,
   onOpenCraftEssenceEnhancement,
   onOpenRankUpQuest,
+  onOpenEventFarm,
 }: HomePageProps) {
   const [battleMenuOpen, setBattleMenuOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -167,6 +171,9 @@ export function HomePage({
               <TaskCard appearance="battle" number="01" caption="PARTY" title="编队/开始" description="选择队伍并开始战斗" onClick={onOpenTeam} />
               {showRankUpQuest && (
                 <TaskCard appearance="enhance" number="02" caption="RANK UP" title="强化任务" description="进入强化任务" onClick={onOpenRankUpQuest} />
+              )}
+              {showEventFarm && (
+                <TaskCard appearance="battle" number="03" caption="EVENT" title="活动刷本" description="从活动地图自动选本进关" onClick={onOpenEventFarm} />
               )}
             </>
           ) : (

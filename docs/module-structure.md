@@ -21,6 +21,7 @@
 | `main.rs` / `lib.rs` | 程序入口、Tauri 插件、共享状态、菜单与命令注册 |
 | `commands/` | 设备、资源、自动化、目录、调试、项目、运行时和设置命令 |
 | `runner/` | 战斗状态机及技能、选卡、阵容、助战、冠位策略 |
+| `runner/event/` | 活动刷本：地图扫描、标签导航、选卡进关（M2 起挂载在战斗 runner 内） |
 | `enhancement_runner/` | 从者强化 |
 | `craft_essence_enhancement_runner/` | 礼装强化策略与材料选择 |
 | `friend_point_summon_runner.rs` | 友情点召唤 |

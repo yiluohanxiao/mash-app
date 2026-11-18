@@ -689,6 +689,79 @@ pub struct OcrRegionResult {
     pub full_text: String,
 }
 
+/// One region label read from the event map viewport.
+///
+/// Coordinates are normalized 0..1 against the full frame, so the
+/// runtime scales them to device pixels at tap time.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapLabel {
+    pub text: String,
+    pub cx: f64,
+    pub cy: f64,
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
+    #[serde(default)]
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapLabelsResult {
+    #[serde(default)]
+    pub labels: Vec<MapLabel>,
+    #[serde(default)]
+    pub full_text: String,
+}
+
+/// One quest card read from the card box on the event map.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestCardResult {
+    #[serde(default)]
+    pub found: bool,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub level: u32,
+    /// Number of ``+`` suffixes on the recommended level (``90++`` = 2).
+    #[serde(default)]
+    pub plus: u32,
+    #[serde(default)]
+    pub ap: u32,
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default)]
+    pub cond: String,
+    #[serde(default)]
+    pub full_text: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventPointsResult {
+    #[serde(default)]
+    pub points: Option<u32>,
+    #[serde(default)]
+    pub full_text: String,
+}
+
+/// Downscaled grayscale frame used to detect whether a map pan moved.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameThumbnail {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub pixels: Vec<u8>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LevelDigitsResult {
@@ -815,10 +888,60 @@ pub enum Screen {
     BattleResultFriendRequest,
     /// AP recovery dialog shown after tapping repeat when AP is insufficient.
     APRecovery,
+    /// Event map (活动地图): region labels and the "管理室" button.
+    EventMap,
+    /// Terminal / home screen (终端): the event banner entry point.
+    Terminal,
+    /// Quest info card opened from a region label (任务信息卡).
+    NodeDetail,
+    /// Quest-start confirmation dialog (是否开始任务).
+    QuestConfirm,
+    /// Story / dialogue screen (剧情).
+    Story,
+    /// "Skip story?" confirmation dialog.
+    SkipConfirm,
+    /// Generic "tap to continue" prompt (请点击游戏界面).
+    TapContinue,
+    /// Loading screen (black, white, or "加载中").
+    Loading,
+    /// Title screen (版本号 in the bottom-left).
+    Title,
+    /// Battle defeat screen. Never tap the stone-revive button.
+    Defeat,
+    /// Transient "该操作无效" toast.
+    Busy,
+    /// Full-screen CG / animation with no readable text.
+    Cg,
+    /// "活动奖励画面选择" dialog opened from the terminal's reward button.
+    RewardSelect,
+    /// Event reward page (点数报酬 / 道具兑换 tabs).
+    RewardPage,
+    /// "从者数已超上限" dialog shown before entering a quest.
+    ServantFull,
+    /// "迦勒底之门" free-quest list. Must outrank `NodeDetail` (both have 关闭).
+    Gate,
+    /// "该支援角色不存在" / "小贴士" popup.
+    Tip,
+    /// "冠位编队确认 / 助战编队确认" pre-battle dialog.
+    PartyConfirm,
+    /// "连续进行同一关卡" repeat dialog shown after a battle.
+    RepeatConfirm,
+    /// Support-list "成员列表将更新" confirmation.
+    ListUpdate,
+    /// "～关于宝具强化专用灵基～" reward-notice confirmation dialog
+    /// (awarded an NP-strengthening-dedicated craft essence).
+    NpCeNotice,
+    /// "游戏公告" announcement dialog the client pushes on its own
+    /// schedule; it can cover any screen mid-run and only offers the
+    /// top-right ✕.
+    GameNotice,
+    /// Command-code detail page pushed automatically whenever a battle
+    /// drops a new command code; only the top-left 关闭 dismisses it.
+    CommandCodeDetail,
     Unknown,
 }
 
-pub(super) const BATTLE_DETECTION_SCREENS: &[&str] = &[
+pub(crate) const BATTLE_DETECTION_SCREENS: &[&str] = &[
     "RankUpQuest",
     "TeamConfirm",
     "TeamChange",
@@ -836,6 +959,36 @@ pub(super) const BATTLE_DETECTION_SCREENS: &[&str] = &[
     "BattleResultContinue",
     "BattleResultFriendRequest",
     "APRecovery",
+    "CommandCodeDetail",
+];
+
+/// Extra screens the event-farm runtime needs on top of the battle scope.
+/// `SidecarClient::use_event_detection` unions these with
+/// `BATTLE_DETECTION_SCREENS` so a single detect call can route the whole
+/// event loop.
+pub(crate) const EVENT_ONLY_DETECTION_SCREENS: &[&str] = &[
+    "EventMap",
+    "Terminal",
+    "NodeDetail",
+    "QuestConfirm",
+    "Story",
+    "SkipConfirm",
+    "TapContinue",
+    "Loading",
+    "Title",
+    "Defeat",
+    "Busy",
+    "Cg",
+    "RewardSelect",
+    "RewardPage",
+    "ServantFull",
+    "Gate",
+    "Tip",
+    "PartyConfirm",
+    "RepeatConfirm",
+    "ListUpdate",
+    "NpCeNotice",
+    "GameNotice",
 ];
 
 impl std::fmt::Display for Screen {
@@ -854,6 +1007,29 @@ impl std::fmt::Display for Screen {
             Self::BattleResultContinue => write!(f, "BattleResultContinue"),
             Self::BattleResultFriendRequest => write!(f, "BattleResultFriendRequest"),
             Self::APRecovery => write!(f, "APRecovery"),
+            Self::EventMap => write!(f, "EventMap"),
+            Self::Terminal => write!(f, "Terminal"),
+            Self::NodeDetail => write!(f, "NodeDetail"),
+            Self::QuestConfirm => write!(f, "QuestConfirm"),
+            Self::Story => write!(f, "Story"),
+            Self::SkipConfirm => write!(f, "SkipConfirm"),
+            Self::TapContinue => write!(f, "TapContinue"),
+            Self::Loading => write!(f, "Loading"),
+            Self::Title => write!(f, "Title"),
+            Self::Defeat => write!(f, "Defeat"),
+            Self::Busy => write!(f, "Busy"),
+            Self::Cg => write!(f, "Cg"),
+            Self::RewardSelect => write!(f, "RewardSelect"),
+            Self::RewardPage => write!(f, "RewardPage"),
+            Self::ServantFull => write!(f, "ServantFull"),
+            Self::Gate => write!(f, "Gate"),
+            Self::Tip => write!(f, "Tip"),
+            Self::PartyConfirm => write!(f, "PartyConfirm"),
+            Self::RepeatConfirm => write!(f, "RepeatConfirm"),
+            Self::ListUpdate => write!(f, "ListUpdate"),
+            Self::NpCeNotice => write!(f, "NpCeNotice"),
+            Self::GameNotice => write!(f, "GameNotice"),
+            Self::CommandCodeDetail => write!(f, "CommandCodeDetail"),
             Self::Unknown => write!(f, "Unknown"),
         }
     }
@@ -879,6 +1055,29 @@ impl FromStr for Screen {
             "BattleResultContinue" => Self::BattleResultContinue,
             "BattleResultFriendRequest" => Self::BattleResultFriendRequest,
             "APRecovery" => Self::APRecovery,
+            "EventMap" => Self::EventMap,
+            "Terminal" => Self::Terminal,
+            "NodeDetail" => Self::NodeDetail,
+            "QuestConfirm" => Self::QuestConfirm,
+            "Story" => Self::Story,
+            "SkipConfirm" => Self::SkipConfirm,
+            "TapContinue" => Self::TapContinue,
+            "Loading" => Self::Loading,
+            "Title" => Self::Title,
+            "Defeat" => Self::Defeat,
+            "Busy" => Self::Busy,
+            "Cg" => Self::Cg,
+            "RewardSelect" => Self::RewardSelect,
+            "RewardPage" => Self::RewardPage,
+            "ServantFull" => Self::ServantFull,
+            "Gate" => Self::Gate,
+            "Tip" => Self::Tip,
+            "PartyConfirm" => Self::PartyConfirm,
+            "RepeatConfirm" => Self::RepeatConfirm,
+            "ListUpdate" => Self::ListUpdate,
+            "NpCeNotice" => Self::NpCeNotice,
+            "GameNotice" => Self::GameNotice,
+            "CommandCodeDetail" => Self::CommandCodeDetail,
             _ => Self::Unknown,
         };
         Ok(screen)

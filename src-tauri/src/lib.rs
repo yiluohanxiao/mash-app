@@ -5,6 +5,7 @@ mod commands;
 mod craft_essence_enhancement_runner;
 mod device_operation;
 mod enhancement_runner;
+pub mod event_harness;
 mod formation_share;
 mod friend_point_summon_runner;
 mod models;
@@ -257,6 +258,7 @@ pub fn run() {
             commands::automation::start_automation,
             commands::rank_up_quest::capture_rank_up_quest_page,
             commands::automation::start_rank_up_quest_automation,
+            commands::automation::start_event_farm_automation,
             commands::automation::stop_automation,
             commands::automation::stop_automation_after_current,
             commands::automation::get_automation_status,
@@ -277,6 +279,7 @@ pub fn run() {
             recognition_diagnostics::delete_recognition_diagnostic,
             recognition_diagnostics::clear_recognition_diagnostics,
             commands::debug::debug_capture,
+            commands::debug::debug_scan_event_map,
             commands::debug::debug_stream_connect,
             commands::debug::debug_stream_disconnect,
             commands::debug::debug_stream_frame,

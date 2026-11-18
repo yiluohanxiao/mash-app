@@ -61,9 +61,38 @@ impl TouchBackend for ScrcpyTouchBackend {
         self.gesture(from, to, swipe_ms, settle_ms)
     }
 
+    fn pinch(
+        &mut self,
+        center: (u32, u32),
+        from_gap: u32,
+        to_gap: u32,
+        duration_ms: u32,
+    ) -> Result<(), String> {
+        let events = pinch_events(
+            center,
+            from_gap,
+            to_gap,
+            self.screen_size,
+            self.control.size,
+            duration_ms,
+        )?;
+        self.control.send(&events)
+    }
+
     fn name(&self) -> &'static str {
         "scrcpy"
     }
+}
+
+fn project_point(point: (u32, u32), screen: (u32, u32), video: (u32, u32)) -> (u32, u32) {
+    let scale = |value: u32, source: u32, target: u32| {
+        ((u64::from(value.min(source - 1)) * u64::from(target) / u64::from(source)) as u32)
+            .min(target - 1)
+    };
+    (
+        scale(point.0, screen.0, video.0),
+        scale(point.1, screen.1, video.1),
+    )
 }
 
 fn gesture_events(
@@ -89,20 +118,11 @@ fn gesture_events(
     if screen.0 == 0 || screen.1 == 0 || video.0 == 0 || video.1 == 0 {
         return Err("scrcpy gesture requires nonzero dimensions".into());
     }
-    let project = |point: (u32, u32)| -> (u32, u32) {
-        let scale = |value: u32, source: u32, target: u32| {
-            ((u64::from(value.min(source - 1)) * u64::from(target) / u64::from(source)) as u32)
-                .min(target - 1)
-        };
-        (
-            scale(point.0, screen.0, video.0),
-            scale(point.1, screen.1, video.1),
-        )
-    };
-    let from = project(from);
-    let to = project(to);
+    let from = project_point(from, screen, video);
+    let to = project_point(to, screen, video);
     let event = |action, point: (u32, u32), at_ms| ScrcpyTouchEvent {
         action,
+        pointer_id: 0,
         x: point.0,
         y: point.1,
         at_ms,
@@ -139,6 +159,70 @@ fn gesture_events(
         }
     }
     events.push(event(1, to, total_ms));
+    Ok(events)
+}
+
+/// Two-finger horizontal pinch in video coordinates.
+///
+/// Both contacts move toward (zoom out) or away from (zoom in) the
+/// center at the same time. Gaps are clamped so the outer contact stays
+/// inside the display; a pinch centered too close to a vertical edge
+/// cannot be expressed and is rejected rather than degraded into a pan.
+fn pinch_events(
+    center: (u32, u32),
+    from_gap: u32,
+    to_gap: u32,
+    screen: (u32, u32),
+    video: (u32, u32),
+    duration_ms: u32,
+) -> Result<Vec<ScrcpyTouchEvent>, String> {
+    if screen.0 == 0 || screen.1 == 0 || video.0 == 0 || video.1 == 0 {
+        return Err("scrcpy pinch requires nonzero dimensions".into());
+    }
+    if !(1..=60_000).contains(&duration_ms) {
+        return Err("scrcpy pinch duration must be 1..=60000 ms".into());
+    }
+    let cx = center.0.min(screen.0 - 1);
+    let cy = center.1.min(screen.1 - 1);
+    let max_gap = cx.min(screen.0 - 1 - cx) * 2;
+    if max_gap == 0 {
+        return Err("scrcpy pinch center is too close to the display edge".into());
+    }
+    let from_gap = from_gap.min(max_gap);
+    let to_gap = to_gap.min(max_gap);
+    if from_gap == 0 {
+        return Err("scrcpy pinch needs a nonzero starting gap".into());
+    }
+    let fingers = |gap: u32| {
+        let half = gap / 2;
+        (
+            project_point((cx - half, cy), screen, video),
+            project_point((cx + (gap - half), cy), screen, video),
+        )
+    };
+    let (left_from, right_from) = fingers(from_gap);
+    let (left_to, right_to) = fingers(to_gap);
+    let event = |action, pointer_id, point: (u32, u32), at_ms| ScrcpyTouchEvent {
+        action,
+        pointer_id,
+        x: point.0,
+        y: point.1,
+        at_ms,
+    };
+    let steps = duration_ms.div_ceil(16).clamp(1, 300);
+    let mut events = vec![event(0, 0, left_from, 0), event(0, 1, right_from, 0)];
+    for step in 1..=steps {
+        let progress = f64::from(step) / f64::from(steps);
+        let gap = (f64::from(from_gap)
+            + (f64::from(to_gap) - f64::from(from_gap)) * progress)
+            .round() as u32;
+        let (left, right) = fingers(gap.min(max_gap));
+        let at_ms = duration_ms * step / steps;
+        events.push(event(2, 0, left, at_ms));
+        events.push(event(2, 1, right, at_ms));
+    }
+    events.push(event(1, 0, left_to, duration_ms));
+    events.push(event(1, 1, right_to, duration_ms));
     Ok(events)
 }
 
@@ -209,6 +293,63 @@ mod tests {
             .windows(2)
             .all(|pair| pair[1].at_ms - pair[0].at_ms <= 16));
         assert_eq!(tail.last().unwrap().at_ms, DRAG_PRESS_MS + 650);
+    }
+
+    #[test]
+    fn pinch_uses_two_pointer_ids_converges_symmetrically_and_releases_both() {
+        let events =
+            pinch_events((960, 540), 300, 60, (1920, 1080), (1920, 1080), 300).unwrap();
+
+        assert_eq!(
+            (events[0].action, events[0].pointer_id, events[0].x, events[0].y),
+            (0, 0, 810, 540)
+        );
+        assert_eq!(
+            (events[1].action, events[1].pointer_id, events[1].x, events[1].y),
+            (0, 1, 1110, 540)
+        );
+        let last = events.last().unwrap();
+        assert_eq!(
+            (last.action, last.pointer_id, last.x, last.at_ms),
+            (1, 1, 990, 300)
+        );
+        assert_eq!(events[events.len() - 2].pointer_id, 0);
+        assert_eq!(events[events.len() - 2].action, 1);
+        assert!(events.windows(2).all(|pair| pair[0].at_ms <= pair[1].at_ms));
+        assert!(events.iter().all(|event| event.x < 1920 && event.y < 1080));
+
+        // Both contacts converge monotonically; the gap only shrinks.
+        let mut previous_gap = 300;
+        for pair in events.chunks(2).skip(1).take(events.len() / 2 - 2) {
+            let gap = pair[1].x - pair[0].x;
+            assert!(gap <= previous_gap, "{gap} > {previous_gap}");
+            previous_gap = gap;
+        }
+        assert_eq!(events[events.len() - 1].x - events[events.len() - 2].x, 60);
+    }
+
+    #[test]
+    fn pinch_clamps_to_display_and_rejects_impossible_geometry() {
+        // Near the left edge the starting gap is clipped instead of
+        // pushing the left contact off screen.
+        let events = pinch_events((50, 540), 300, 60, (1920, 1080), (1920, 1080), 200).unwrap();
+        assert_eq!((events[0].x, events[0].y), (0, 540));
+        assert_eq!((events[1].x, events[1].y), (100, 540));
+        assert_eq!(events[events.len() - 2].x, 20);
+        assert_eq!(events[events.len() - 1].x, 80);
+
+        assert!(pinch_events((0, 540), 300, 60, (1920, 1080), (1920, 1080), 200).is_err());
+        assert!(pinch_events((960, 540), 0, 60, (1920, 1080), (1920, 1080), 200).is_err());
+        assert!(pinch_events((960, 540), 300, 60, (1920, 1080), (1920, 1080), 0).is_err());
+        assert!(pinch_events((960, 540), 300, 60, (1920, 1080), (1920, 1080), 60_001).is_err());
+    }
+
+    #[test]
+    fn pinch_stays_within_the_604_event_protocol_cap() {
+        let events =
+            pinch_events((960, 540), 300, 60, (1920, 1080), (1920, 1080), 60_000).unwrap();
+        assert_eq!(events.len(), 604);
+        assert_eq!(events.last().unwrap().at_ms, 60_000);
     }
 
     #[test]
